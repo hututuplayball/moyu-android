@@ -241,7 +241,14 @@ h2.title{
   transform:scaleX(0);transform-origin:left;transition:transform 1.2s var(--ease) .6s;
 }
 .hero.ready h1 .l2 svg{transform:scaleX(1)}
-.hero-lead{font-size:clamp(16px,1.7vw,19px);color:var(--ink-2);max-width:34ch;margin:26px 0 0;line-height:1.9}
+.hero-lead{
+  font-size:clamp(16px,1.7vw,19px);color:var(--ink-2);max-width:36ch;margin:28px 0 0;line-height:1.95;
+  padding-left:20px;border-left:2px solid color-mix(in srgb,var(--gold) 48%,transparent);
+}
+.hero-lead em{
+  font-style:normal;color:var(--ink);font-weight:500;padding:0 1px;
+  background:linear-gradient(180deg,transparent 66%,color-mix(in srgb,var(--gold) 32%,transparent) 66%,color-mix(in srgb,var(--gold) 32%,transparent) 92%,transparent 92%);
+}
 .hero-cta{display:flex;flex-wrap:wrap;gap:14px;margin-top:38px}
 .hero-meta{display:flex;flex-wrap:wrap;gap:30px;margin-top:52px;padding-top:30px;border-top:1px solid var(--line-soft)}
 .hero-meta div{display:flex;flex-direction:column;align-items:center;gap:4px;text-align:center}
@@ -251,10 +258,16 @@ h2.title{
 /* --- 手机模型 --- */
 .hero-visual{position:relative;display:flex;justify-content:center;perspective:1400px}
 .hero-visual::after{
-  content:"";position:absolute;left:0;right:0;bottom:1%;margin:auto;width:min(272px,64%);height:30px;
+  content:"";position:absolute;left:0;right:0;bottom:4%;margin:auto;width:min(240px,58%);height:26px;
   background:radial-gradient(50% 50% at 50% 50%,var(--ground),transparent 72%);
-  filter:blur(9px);pointer-events:none;z-index:-1;
+  filter:blur(10px);pointer-events:none;z-index:-1;
 }
+
+/* 手机界面截图（由 ?shot 模式导出，含透明背景与外阴影） */
+.phone-shot{position:relative;z-index:1;display:block;width:min(400px,88vw);height:auto;user-select:none;-webkit-user-drag:none}
+.phone-shot.shot-dark{display:none}
+[data-theme="dark"] .phone-shot.shot-light{display:none}
+[data-theme="dark"] .phone-shot.shot-dark{display:block}
 .phone{
   position:relative;z-index:1;width:min(320px,78vw);aspect-ratio:9/19.3;border-radius:44px;
   background:linear-gradient(160deg,#2C4639,#1B2E25);padding:9px;
@@ -451,7 +464,37 @@ footer{border-top:1px solid var(--line-soft);padding:52px 0 44px}
   .pillar h3{font-size:19px}
   footer{padding:40px 0 32px}
 }
+
+/* ============ 截图模式（?shot）============ */
+/* 仅用于导出手机界面静态图，正常访问不受影响 */
+html.shot{background:transparent}
+html.shot body{background:transparent;margin:0;min-height:100vh;display:grid;place-items:center;overflow:hidden}
+html.shot .grain,
+html.shot .progress,
+html.shot .nav,
+html.shot .to-top,
+html.shot .hero-copy,
+html.shot .float-badge,
+html.shot .formats,
+html.shot .section,
+html.shot footer{display:none!important}
+html.shot .hero-visual::after{display:none!important}
+html.shot .hero{padding:0!important;background:none!important;min-height:0!important;overflow:visible!important}
+html.shot .hero-grid{display:block!important;max-width:none!important;padding:0!important;margin:0!important;gap:0!important}
+html.shot .hero-visual{display:flex!important;justify-content:center!important;padding:0!important;margin:0!important}
+html.shot .phone{animation:none!important;transform:none!important;width:320px!important}
 </style>
+<script>
+  // 截图模式：?shot 隐藏除手机模型外的所有内容；追加 &dark 导出深色版本
+  if (location.search.indexOf("shot") > -1) {
+    document.documentElement.classList.add("shot");
+    if (location.search.indexOf("dark") > -1) {
+      setTimeout(function () {
+        document.documentElement.setAttribute("data-theme", "dark");
+      }, 0);
+    }
+  }
+</script>
 </head>
 <body>
 
@@ -475,7 +518,6 @@ footer{border-top:1px solid var(--line-soft);padding:52px 0 44px}
       </span>
       <span class="brand-text">
         <span class="brand-cn">墨屿</span>
-        <span class="brand-en">Moyu Reader</span>
       </span>
     </a>
 
@@ -521,7 +563,8 @@ footer{border-top:1px solid var(--line-soft);padding:52px 0 44px}
       </h1>
 
       <p class="hero-lead reveal" style="--i:1">
-        墨屿只做本地阅读：不请求网络，不要求账号，不推送通知。书架与阅读进度仅保存在本机。
+        墨屿只做本地阅读：<em>不请求网络</em>、<em>不要求账号</em>、<em>不推送通知</em>。
+        书架与阅读进度仅保存在本机。
       </p>
 
       <div class="hero-cta reveal" style="--i:2">
@@ -543,99 +586,8 @@ footer{border-top:1px solid var(--line-soft);padding:52px 0 44px}
     </div>
 
     <div class="hero-visual reveal" style="--i:2">
-      <div class="phone" id="phone">
-        <span class="ph-key k1"></span>
-        <span class="ph-key k2"></span>
-        <span class="ph-key k3"></span>
-        <div class="phone-screen">
-          <div class="ph-island"></div>
-          <div class="ph-status"><span>3:16</span><span class="ph-sig">4G ▮▮▮ 81</span></div>
-
-          <div class="ph-head">
-            <div class="ph-brand">
-              <div class="ph-title">墨屿</div>
-              <div class="ph-sub">方寸之间，自有山海。</div>
-            </div>
-            <div class="ph-tools">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>
-              <svg class="ph-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.8v2.4M12 18.8v2.4M4.4 12H2M22 12h-2.4M6.3 6.3 4.6 4.6M19.4 19.4l-1.7-1.7M6.3 17.7l-1.7 1.7M19.4 4.6l-1.7 1.7"/></svg>
-            </div>
-          </div>
-
-          <div class="ph-seg">
-            <button class="on">漫画 <b>6</b></button>
-            <button>电子书 <b>1</b></button>
-          </div>
-
-          <div class="ph-shelf">
-            <div class="ph-shelf-top">
-              <span class="ph-live">
-                <i class="ph-live-cover"></i>
-                <i class="ph-live-badge">
-                  <svg viewBox="0 0 24 24" fill="currentColor" width="9" height="9"><path d="M8 5.5v13l11-6.5z"/></svg>
-                </i>
-              </span>
-              <div class="ph-shelf-meta">
-                <div class="ph-shelf-kicker">最近阅读</div>
-                <div class="ph-shelf-name">云海游侠</div>
-                <div class="ph-shelf-sub">第 12 话 · 已读 68%</div>
-              </div>
-              <span class="ph-shelf-go">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13M13 6l6 6-6 6"/></svg>
-              </span>
-            </div>
-            <div class="ph-shelf-bar"><i style="width:68%"></i></div>
-          </div>
-
-          <div class="ph-shelf">
-            <div class="ph-shelf-top">
-              <div class="ph-fan"><i></i><i></i><i></i></div>
-              <div class="ph-shelf-meta">
-                <div class="ph-shelf-kicker">我的书架</div>
-                <div class="ph-shelf-name">全部漫画</div>
-                <div class="ph-shelf-sub">6 本 · 可按分组整理</div>
-              </div>
-              <span class="ph-shelf-go">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13M13 6l6 6-6 6"/></svg>
-              </span>
-            </div>
-            <div class="ph-shelf-bar"><i></i></div>
-          </div>
-
-          <div class="ph-group-label">分组</div>
-          <div class="ph-groups">
-            <div class="ph-gcard">
-              <div class="ph-fan"><i></i><i></i><i></i></div>
-              <span class="ph-gcount">6 本</span>
-              <span class="ph-gname">默认分组</span>
-            </div>
-            <div class="ph-gcard add">
-              <span class="ph-plus">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-              </span>
-              <span class="ph-gname">新建分组</span>
-            </div>
-          </div>
-
-          <div class="ph-tabs">
-            <span class="on">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H11v16H5.5A1.5 1.5 0 0 1 4 18.5zM13 4h5.5A1.5 1.5 0 0 1 20 5.5v13a1.5 1.5 0 0 1-1.5 1.5H13z"/></svg>
-              书架
-            </span>
-            <span>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>
-              搜索
-            </span>
-            <span>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.8v2.4M12 18.8v2.4M4.4 12H2M22 12h-2.4M6.3 6.3 4.6 4.6M19.4 19.4l-1.7-1.7M6.3 17.7l-1.7 1.7M19.4 4.6l-1.7 1.7"/></svg>
-              设置
-            </span>
-          </div>
-
-          <div class="ph-home"></div>
-        </div>
-      </div>
+      <img class="phone-shot shot-light" src="assets/phone-light.png" alt="墨屿书架界面：最近阅读、全部漫画与分组" width="400" height="800" />
+      <img class="phone-shot shot-dark" src="assets/phone-dark.png" alt="" aria-hidden="true" width="400" height="800" />
 
       <div class="float-badge b1">
         <span class="dot" style="background:var(--gold-soft);color:var(--gold-deep)">

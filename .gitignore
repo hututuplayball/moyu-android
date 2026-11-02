@@ -1,5 +1,6 @@
 # ==== Gradle 构建缓存与产物 ====
 .gradle/
+.kotlin/
 build/
 **/build/
 captures/

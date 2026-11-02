@@ -1,0 +1,8 @@
+<resources>
+    <style name="Theme.Moyu.Starting" parent="Theme.Moyu">
+        <item name="android:windowSplashScreenBackground">@color/splash_background</item>
+        <!-- The system splash is only paper; the wordmark is drawn by the Compose page. -->
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/splash_blank</item>
+        <item name="android:windowSplashScreenAnimationDuration">0</item>
+    </style>
+</resources>

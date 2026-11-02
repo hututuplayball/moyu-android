@@ -1,0 +1,14 @@
+<resources>
+    <style name="Theme.Moyu" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowBackground">@color/window_background</item>
+        <item name="android:colorAccent">#526947</item>
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
+    <style name="Theme.Moyu.Starting" parent="Theme.Moyu">
+        <item name="android:windowBackground">@drawable/moyu_splash</item>
+        <!-- ColorOS otherwise paints a white/icon launch preview before the first Compose frame. -->
+        <item name="android:windowDisablePreview">true</item>
+    </style>
+</resources>

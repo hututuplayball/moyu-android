@@ -18,18 +18,13 @@
 
 ---
 
-## 截图
+## 官网
 
-> 待补充。把手机截图放进 `docs/screenshots/`，命名见该目录下的说明，然后取消下面这段的注释即可显示。
-
-<!-- 截图就绪后取消注释
 <p align="center">
-  <img src="docs/screenshots/library.png" width="24%" alt="书架" />
-  <img src="docs/screenshots/reader-comic.png" width="24%" alt="条漫阅读" />
-  <img src="docs/screenshots/reader-text.png" width="24%" alt="文字阅读" />
-  <img src="docs/screenshots/settings.png" width="24%" alt="设置" />
+  <a href="https://hututuplayball.github.io/moyu-android/">hututuplayball.github.io/moyu-android</a>
 </p>
--->
+
+页面源码见 [`docs/index.html`](docs/index.html)。
 
 ---
 
@@ -87,98 +82,3 @@
 | PDF 文本层 | PDFBox-Android 2.0.27.0 |
 | 测试 | JUnit 4 + Robolectric 4.14.1 + Compose UI Test |
 | SDK | minSdk 26（Android 8.0）/ compileSdk & targetSdk 35 |
-
----
-
-## 构建
-
-### 环境准备
-
-1. JDK 17
-2. Android SDK（compileSdk 35、build-tools 35.0.0）
-3. 在仓库根目录创建 `local.properties`，指向本机 SDK：
-
-```properties
-sdk.dir=C\:\\Users\\<you>\\AppData\\Local\\Android\\Sdk
-```
-
-### 构建 Debug 包
-
-```bash
-# Windows
-gradlew.bat assembleDebug
-
-# macOS / Linux
-./gradlew assembleDebug
-```
-
-### 构建 Release 包
-
-Release 使用独立密钥签名，签名信息不在仓库内。在根目录创建 `keystore.properties`：
-
-```properties
-storeFile=../.tooling/your-release.jks
-storePassword=******
-keyAlias=******
-keyPassword=******
-```
-
-然后：
-
-```bash
-gradlew.bat assembleRelease
-```
-
-产物位于 `app/build/outputs/apk/release/`。`keystore.properties`、`*.jks`、`*.keystore` 均已被 `.gitignore` 排除。
-
----
-
-## 测试
-
-```bash
-# JVM 单元测试（Robolectric，覆盖解析、排序、排版、备份等）
-gradlew.bat test
-
-# 设备/模拟器上的界面测试
-gradlew.bat connectedAndroidTest
-```
-
----
-
-## 项目结构
-
-```
-app/src/main/java/com/moyu/reader/
-├── MainActivity.kt          入口 Activity
-├── ReaderViewModel.kt       阅读器状态与生命周期
-├── book/                    PDF / EPUB / TXT 解析、编码识别、文本排版与缓存
-├── data/                    Room 实体与 DAO、仓库、偏好设置、备份编解码
-├── page/                    页面源抽象（文本页 / 图片页）
-├── pdf/                     PDF 会话封装
-└── ui/                      Compose 界面：书架、阅读器、设置、主题、预读
-```
-
-```
-artwork/                     品牌资源：logo 矢量图与位图
-docs/screenshots/            界面截图
-```
-
----
-
-## 发版
-
-```bash
-git tag -a v1.0 -m "墨屿 1.0"
-git push origin v1.0
-```
-
-在 GitHub 的 Release 页面选择该标签，上传 `app-release.apk` 后发布。
-
-> Release 附件名只保留 ASCII 字符，中文会被剥离。建议将安装包命名为 `moyu-v1.0.apk`。
-
----
-
-## 说明
-
-- 卸载应用会清除本地数据，重装前请先在应用内导出备份
-- 本仓库不包含任何签名文件与密钥

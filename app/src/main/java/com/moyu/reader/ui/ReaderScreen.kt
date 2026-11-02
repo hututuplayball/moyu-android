@@ -157,7 +157,26 @@ fun ReaderScreen(
         onDispose {
             val live = session
             session = null
-            if (live != null) closer.launch { live.close() }
+            // Close the source first, then collect after its coroutine has released its last
+            // reference. Android otherwise keeps the freed page bitmaps until another allocation
+            // pressures the heap, which made returning to the shelf look like it never dropped.
+            var closeJob = live?.let { source ->
+                closer.launch {
+                    try {
+                        source.close()
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        // The reader is already gone; a failed close must not keep it alive.
+                    }
+                }
+            }
+            closer.launch {
+                closeJob?.join()
+                closeJob = null
+                delay(150)
+                Runtime.getRuntime().gc()
+            }
         }
     }
     val isText = book.format == FORMAT_TEXT || book.format == FORMAT_EPUB || (isPdf && textView)
@@ -558,6 +577,11 @@ private fun ReaderContent(
     // Panels close themselves through this wrapper, so no panel has to know about chrome state.
     val jumpAndClose: (Int) -> Unit = { page -> jump(page); panel = null }
     val textSource = session as? TextPageSource
+    // Pages are replaced when a chapter is loaded; the revision must invalidate the cached percent,
+    // otherwise a TOC jump that lands on the same page index leaves the old chapter label on screen.
+    val textPagePercent = remember(textSource, currentPage, pageCount, pagesVersion) {
+        textSource?.progressPercentOfPage(currentPage) ?: 0
+    }
     // Bookmarks, progress and the page label stay in PDF pages, whichever view is on screen.
     val pdfPage = if (pdfTextView && pdfAnchors != null && textSource != null) {
         PdfTextLayout.pageForOffset(pdfAnchors, textSource.charOffsetOfPage(currentPage).toInt())
@@ -640,6 +664,28 @@ private fun ReaderContent(
             val offset = (session as? TextPageSource)?.charOffsetOfPage(currentPage) ?: 0L
             onTextSettings(transform(current), offset)
         }
+    }
+    // The settle collector runs a frame after the page stops; leaving must save the page that is
+    // actually on screen or a quick exit records the previous page.
+    val saveVisiblePosition by rememberUpdatedState {
+        if (restorePage == null && pendingJump == null && pageCount > 0) {
+            val page = if (mode == "vertical") listState.firstVisibleItemIndex else pagerState.currentPage
+            val safePage = page.coerceIn(0, pageCount - 1)
+            val scroll = if (mode == "vertical") {
+                normalizedPageOffset(listState.firstVisibleItemScrollOffset, viewport.measuredZoom)
+            } else {
+                0
+            }
+            reportPosition(safePage, scroll, mode)
+        }
+    }
+    val contentLifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(contentLifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) saveVisiblePosition()
+        }
+        contentLifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { contentLifecycleOwner.lifecycle.removeObserver(observer) }
     }
     LaunchedEffect(restorePage, mode) {
         val target = restorePage ?: return@LaunchedEffect
@@ -748,7 +794,10 @@ private fun ReaderContent(
             panel != null -> panel = null
             chrome -> chrome = false
             viewport.zoom > 1.01f -> viewport.toggleZoom()
-            else -> onBack()
+            else -> {
+                saveVisiblePosition()
+                onBack()
+            }
         }
     }
     Box(Modifier.fillMaxSize().background(readerBackground)) {
@@ -790,7 +839,10 @@ private fun ReaderContent(
         AnimatedVisibility(chrome, Modifier.align(Alignment.TopCenter), enter = fadeIn(tween(motionDuration)) + slideInVertically(tween(motionDuration)) { -it }, exit = fadeOut(tween(motionDuration)) + slideOutVertically(tween(motionDuration)) { -it }) {
             Surface(color = MaterialTheme.colorScheme.background.copy(alpha = .97f), shadowElevation = 2.dp) {
                 Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    PaperIconAction(Icons.AutoMirrored.Rounded.ArrowBack, "返回书架", onBack)
+                    PaperIconAction(Icons.AutoMirrored.Rounded.ArrowBack, "返回书架", {
+                        saveVisiblePosition()
+                        onBack()
+                    })
                     Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(book.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall)
                         // Text books keep the chapter heading on the page itself; the chrome only
@@ -869,7 +921,7 @@ private fun ReaderContent(
                             val shownPage = (slider?.roundToInt() ?: currentPage)
                                 .coerceIn(0, pageCount - 1)
                             val shownProgress = if (source != null) {
-                                (pendingPercent ?: slider ?: source.progressPercentOfPage(currentPage).toFloat())
+                                (pendingPercent ?: slider ?: textPagePercent.toFloat())
                                     .coerceIn(0f, 100f)
                             } else null
                             Row(Modifier.fillMaxWidth().padding(horizontal = 22.dp), horizontalArrangement = Arrangement.SpaceBetween) {

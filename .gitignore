@@ -31,7 +31,3 @@ Thumbs.db
 
 # ==== 日志 ====
 *.log
-
-# ==== 本地文档（只留本机，不入库）====
-/README.md
-/docs/screenshots/

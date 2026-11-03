@@ -274,11 +274,7 @@ h2.title{
   filter:blur(10px);pointer-events:none;z-index:-1;
 }
 
-/* 手机界面截图（由 ?shot 模式导出，含透明背景与外阴影） */
-.phone-shot{position:relative;z-index:1;display:block;width:min(400px,88vw);height:auto;user-select:none;-webkit-user-drag:none}
-.phone-shot.shot-dark{display:none}
-[data-theme="dark"] .phone-shot.shot-light{display:none}
-[data-theme="dark"] .phone-shot.shot-dark{display:block}
+/* 手机模型（同时用于 ?shot 模式导出静态图） */
 .phone{
   position:relative;z-index:1;width:min(320px,78vw);aspect-ratio:9/19.3;border-radius:44px;
   background:linear-gradient(160deg,#2C4639,#1B2E25);padding:9px;
@@ -305,9 +301,7 @@ h2.title{
   display:flex;flex-direction:column;position:relative;
 }
 /* --- App 界面模拟 --- */
-.ph-status{display:flex;justify-content:space-between;align-items:center;padding:13px 18px 2px;font-size:10.5px;color:var(--ink-2);font-weight:600}
-.ph-sig{letter-spacing:.05em;font-size:9px;color:var(--ink-3)}
-.ph-head{display:flex;align-items:flex-start;justify-content:space-between;padding:10px 16px 0}
+.ph-head{display:flex;align-items:flex-start;justify-content:space-between;padding:34px 16px 0}
 .ph-brand{display:flex;flex-direction:column;gap:4px}
 .ph-title{font-family:var(--font-display);font-size:25px;font-weight:700;letter-spacing:.1em;line-height:1}
 .ph-sub{font-size:10px;color:var(--ink-3);letter-spacing:.06em}
@@ -354,20 +348,17 @@ h2.title{
 .ph-live-cover::before{content:"";position:absolute;left:0;right:0;bottom:0;height:46%;background:radial-gradient(58% 100% at 24% 100%,rgba(255,255,255,.17),transparent 68%),radial-gradient(72% 108% at 80% 100%,rgba(0,0,0,.2),transparent 72%)}
 .ph-live-badge{position:absolute;right:-6px;bottom:-6px;width:20px;height:20px;border-radius:50%;background:var(--gold);color:#263E33;font-size:9px;font-style:normal;display:grid;place-items:center;font-weight:700;box-shadow:0 2px 6px rgba(0,0,0,.24);z-index:3}
 [data-theme="dark"] .ph-live-badge{color:#191A19}
-
-/* 底部标签栏 */
-.ph-tabs{margin-top:auto;display:flex;align-items:center;justify-content:space-around;padding:8px 12px 26px;background:var(--paper-2);border-top:1px solid var(--line-soft);flex-shrink:0}
-.ph-tabs span{display:flex;flex-direction:column;align-items:center;gap:4px;font-size:9px;color:var(--ink-3)}
-.ph-tabs span.on{color:var(--green)}
-.ph-tabs svg{width:17px;height:17px}
+.ph-live-badge svg{width:9px;height:9px;fill:currentColor}
 
 .float-badge{
   position:absolute;z-index:2;background:var(--paper-2);border:1px solid var(--line);border-radius:16px;
   padding:12px 16px;box-shadow:var(--shadow-m);display:flex;align-items:center;gap:11px;
+  width:max-content;white-space:nowrap;
   animation:floaty 6s ease-in-out infinite;
 }
-.float-badge.b1{top:9%;left:-4%;animation-delay:.4s}
-.float-badge.b2{bottom:13%;right:-5%;animation-delay:1.6s}
+/* 以手机中心为基准定位，只压住边框，不遮挡屏幕里的文字 */
+.float-badge.b1{top:6%;right:calc(50% + 138px);left:auto;animation-delay:.4s}
+.float-badge.b2{bottom:14%;left:calc(50% + 143px);right:auto;animation-delay:1.6s}
 @keyframes floaty{0%,100%{transform:translateY(0)}50%{transform:translateY(-11px)}}
 .float-badge .dot{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;flex-shrink:0}
 .float-badge .dot svg{width:16px;height:16px}
@@ -612,8 +603,73 @@ html.shot .phone{animation:none!important;transform:none!important;width:320px!i
     </div>
 
     <div class="hero-visual reveal" style="--i:2">
-      <img class="phone-shot shot-light" src="screenshots/phone-light.png" alt="墨屿书架界面：最近阅读、全部漫画与分组" width="400" height="800" />
-      <img class="phone-shot shot-dark" src="screenshots/phone-dark.png" alt="" aria-hidden="true" width="400" height="800" />
+      <div class="phone" id="phone" role="img" aria-label="墨屿书架界面：最近阅读、全部漫画与分组">
+        <span class="ph-key k1" aria-hidden="true"></span>
+        <span class="ph-key k2" aria-hidden="true"></span>
+        <span class="ph-key k3" aria-hidden="true"></span>
+        <div class="ph-island" aria-hidden="true"></div>
+        <div class="phone-screen" aria-hidden="true">
+          <div class="ph-head">
+            <div class="ph-brand">
+              <span class="ph-title">墨屿</span>
+              <span class="ph-sub">方寸之间，自有山海。</span>
+            </div>
+            <div class="ph-tools">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="6.3"/><path d="M15.6 15.6 21 21"/></svg>
+              <svg class="ph-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 4.5v15M4.5 12h15"/></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.4 5.4l1.4 1.4M17.2 17.2l1.4 1.4M18.6 5.4l-1.4 1.4M6.8 17.2l-1.4 1.4"/></svg>
+            </div>
+          </div>
+
+          <div class="ph-seg">
+            <button type="button" class="on">漫画 <b>6</b></button>
+            <button type="button">电子书 <b>1</b></button>
+          </div>
+
+          <div class="ph-shelf">
+            <div class="ph-shelf-top">
+              <div class="ph-live">
+                <span class="ph-live-cover"></span>
+                <i class="ph-live-badge"><svg viewBox="0 0 24 24"><path d="M9 5.5 18.5 12 9 18.5Z"/></svg></i>
+              </div>
+              <div class="ph-shelf-meta">
+                <span class="ph-shelf-kicker">最近阅读</span>
+                <div class="ph-shelf-name">云海游侠</div>
+                <div class="ph-shelf-sub">第 12 话 · 已读 68%</div>
+              </div>
+              <span class="ph-shelf-go"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h15M13 6l6 6-6 6"/></svg></span>
+            </div>
+            <span class="ph-shelf-bar"><i style="width:68%"></i></span>
+          </div>
+
+          <div class="ph-shelf">
+            <div class="ph-shelf-top">
+              <div class="ph-fan"><i></i><i></i><i></i></div>
+              <div class="ph-shelf-meta">
+                <span class="ph-shelf-kicker">我的书架</span>
+                <div class="ph-shelf-name">全部漫画</div>
+                <div class="ph-shelf-sub">6 本 · 可按分组整理</div>
+              </div>
+              <span class="ph-shelf-go"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h15M13 6l6 6-6 6"/></svg></span>
+            </div>
+            <span class="ph-shelf-bar"><i></i></span>
+          </div>
+
+          <div class="ph-group-label">分组</div>
+          <div class="ph-groups">
+            <div class="ph-gcard">
+              <div class="ph-fan"><i></i><i></i><i></i></div>
+              <span class="ph-gcount">6 本</span>
+              <span class="ph-gname">默认分组</span>
+            </div>
+            <div class="ph-gcard add">
+              <span class="ph-plus"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 4.5v15M4.5 12h15"/></svg></span>
+              <span class="ph-gname">新建分组</span>
+            </div>
+          </div>
+        </div>
+        <div class="ph-home" aria-hidden="true"></div>
+      </div>
 
       <div class="float-badge b1">
         <span class="dot" style="background:var(--gold-soft);color:var(--gold-deep)">

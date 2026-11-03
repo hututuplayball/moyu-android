@@ -10,7 +10,7 @@
 <meta property="og:title" content="墨屿 Moyu · 方寸之间，自有山海" />
 <meta property="og:description" content="完全离线的本地漫画与电子书阅读器。3.9 MB，Android 8.0+。" />
 <meta property="og:type" content="website" />
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 108 108'%3E%3Crect width='108' height='108' rx='24' fill='%23263E33'/%3E%3Ccircle cx='42.5' cy='32' r='4.5' fill='%23DAB478'/%3E%3Cg transform='translate(54 54) scale(0.76) translate(-54 -54)'%3E%3Cpath d='M27 42 C36 40 45 43 52 49 L52 69 C44 64 36 62 27 63 Z' fill='%23FFF8E6'/%3E%3Cpath d='M56 49 C61 44 66 40 70 35 C72 42 76 44 81 43 L81 61 C72 61 63 64 56 69 Z' fill='%23FFF8E6'/%3E%3Cpath d='M28 68 C38 67 45 74 54 74 C65 74 71 65 80 66 C72 70 67 79 54 79 C42 79 36 72 28 72 Z' fill='%23FFF8E6'/%3E%3C/g%3E%3C/svg%3E" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 108 108'%3E%3Crect width='108' height='108' rx='26' fill='%23263E33'/%3E%3Ccircle cx='42' cy='29' r='4.2' fill='%23DAB478'/%3E%3Cg transform='translate(54 54) scale(1.1) translate(-54 -54)'%3E%3Cpath d='M27 42 C36 40 45 43 52 49 L52 69 C44 64 36 62 27 63 Z' fill='%23FFF8E6'/%3E%3Cpath d='M56 49 C61 44 66 40 70 35 C72 42 76 44 81 43 L81 61 C72 61 63 64 56 69 Z' fill='%23FFF8E6'/%3E%3Cpath d='M28 68 C38 67 45 74 54 74 C65 74 71 65 80 66 C72 70 67 79 54 79 C42 79 36 72 28 72 Z' fill='%23FFF8E6'/%3E%3C/g%3E%3C/svg%3E" />
 <style>
 /* ============================================================
    墨屿 Moyu · 官网
@@ -122,7 +122,7 @@ button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
 .brand:hover .brand-mark{transform:rotate(-8deg) scale(1.06)}
 .brand-mark svg{width:100%;height:100%}
 .brand-text{display:flex;flex-direction:column;line-height:1.05}
-.brand-cn{font-family:var(--font-display);font-size:19px;font-weight:700;letter-spacing:.22em}
+.brand-cn{font-family:var(--font-display);font-size:23px;font-weight:700;letter-spacing:.22em}
 .brand-en{font-size:9.5px;letter-spacing:.34em;color:var(--ink-3);text-transform:uppercase;margin-top:3px}
 
 .nav-links{display:flex;align-items:center;gap:4px;margin-left:auto}
@@ -233,14 +233,25 @@ h2.title{
   font-family:var(--font-display);font-weight:700;line-height:1.12;letter-spacing:.02em;
   font-size:clamp(40px,6.4vw,76px);margin:0;
 }
-.hero h1 .l2{display:block;color:var(--green);position:relative}
+.hero h1 .l2{display:block;width:fit-content;color:var(--green);position:relative}
 [data-theme="dark"] .hero h1 .l2{color:var(--gold)}
 .hero h1 .l2 svg{
-  position:absolute;left:-.04em;bottom:-.1em;width:100%;height:.42em;z-index:-1;
-  fill:color-mix(in srgb,var(--gold) 42%,transparent);
-  transform:scaleX(0);transform-origin:left;transition:transform 1.2s var(--ease) .6s;
+  position:absolute;left:-.04em;bottom:-.36em;width:100%;height:.5em;z-index:-1;
+  fill:none;color:color-mix(in srgb,var(--gold) 66%,var(--green));
+  transform:scaleX(0);transform-origin:left;transition:transform .7s var(--ease);
 }
+.hero h1 .l2 svg .far{opacity:.4}
+.hero h1 .l2 svg .wave{opacity:.6}
+.hero h1 .l2 svg .sail{fill:currentColor;opacity:.28;stroke:none}
 .hero.ready h1 .l2 svg{transform:scaleX(1)}
+/* 太阳独立于被拉伸的 SVG，保证任何宽度下都是正圆 */
+.hero h1 .l2 .sun-dot{
+  position:absolute;left:calc(86.67% - .04em);bottom:-.187em;
+  width:.12em;height:.12em;border-radius:50%;background:var(--gold-deep);
+  opacity:0;transform:translateX(-50%) scale(.3);
+  transition:opacity .5s var(--ease) .2s,transform .6s var(--ease) .2s;
+}
+.hero.ready h1 .l2 .sun-dot{opacity:.72;transform:translateX(-50%) scale(1)}
 .hero-lead{
   font-size:clamp(16px,1.7vw,19px);color:var(--ink-2);max-width:36ch;margin:28px 0 0;line-height:1.95;
   padding-left:20px;border-left:2px solid color-mix(in srgb,var(--gold) 48%,transparent);
@@ -508,8 +519,8 @@ html.shot .phone{animation:none!important;transform:none!important;width:320px!i
       <span class="brand-mark" aria-hidden="true">
         <svg viewBox="0 0 108 108" xmlns="http://www.w3.org/2000/svg">
           <rect width="108" height="108" rx="26" fill="#263E33"/>
-          <circle cx="42.5" cy="32" r="4.5" fill="#DAB478"/>
-          <g transform="translate(54 54) scale(0.76) translate(-54 -54)">
+          <circle cx="42" cy="29" r="4.2" fill="#DAB478"/>
+          <g transform="translate(54 54) scale(1.1) translate(-54 -54)">
             <path d="M27,42 C36,40 45,43 52,49 L52,69 C44,64 36,62 27,63 Z" fill="#FFF8E6"/>
             <path d="M56,49 C61,44 66,40 70,35 C72,42 76,44 81,43 L81,61 C72,61 63,64 56,69 Z" fill="#FFF8E6"/>
             <path d="M28,68 C38,67 45,74 54,74 C65,74 71,65 80,66 C72,70 67,79 54,79 C42,79 36,72 28,72 Z" fill="#FFF8E6"/>
@@ -558,7 +569,22 @@ html.shot .phone{animation:none!important;transform:none!important;width:320px!i
         方寸之间
         <span class="l2">
           自有山海
-          <svg viewBox="0 0 300 14" preserveAspectRatio="none" aria-hidden="true"><path d="M2 9C60 3 120 2 180 5c40 2 78 4 118 2" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"/></svg>
+          <span class="sun-dot" aria-hidden="true"></span>
+          <svg viewBox="0 0 300 60" preserveAspectRatio="none" aria-hidden="true">
+            <defs>
+              <linearGradient id="shanhai-ink" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0" style="stop-color:var(--gold-deep)"/>
+                <stop offset=".5" style="stop-color:var(--gold)"/>
+                <stop offset="1" style="stop-color:var(--green)"/>
+              </linearGradient>
+            </defs>
+            <path class="far" d="M8 40L32 34L56 22L80 34L104 28L130 18L156 32L180 26L204 34" fill="none" stroke="url(#shanhai-ink)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M0 34L24 28L50 10L76 30L100 22L126 6L154 30L180 38L200 46" fill="none" stroke="url(#shanhai-ink)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M204 42C216 38 228 38 240 42C252 46 264 46 276 42C286 38 294 38 300 42" fill="none" stroke="url(#shanhai-ink)" stroke-width="2.4" stroke-linecap="round"/>
+            <path class="wave" d="M214 49C226 46 238 46 250 49C262 52 274 52 286 49C292 48 298 48 300 49" fill="none" stroke="url(#shanhai-ink)" stroke-width="1.6" stroke-linecap="round"/>
+            <path class="sail" d="M232 34L243 45L232 45Z"/>
+            <path d="M218 46C226 51 236 51 244 46M231 47L231 33" fill="none" stroke="url(#shanhai-ink)" stroke-width="1.6" stroke-linecap="round"/>
+          </svg>
         </span>
       </h1>
 
@@ -586,8 +612,8 @@ html.shot .phone{animation:none!important;transform:none!important;width:320px!i
     </div>
 
     <div class="hero-visual reveal" style="--i:2">
-      <img class="phone-shot shot-light" src="assets/phone-light.png" alt="墨屿书架界面：最近阅读、全部漫画与分组" width="400" height="800" />
-      <img class="phone-shot shot-dark" src="assets/phone-dark.png" alt="" aria-hidden="true" width="400" height="800" />
+      <img class="phone-shot shot-light" src="screenshots/phone-light.png" alt="墨屿书架界面：最近阅读、全部漫画与分组" width="400" height="800" />
+      <img class="phone-shot shot-dark" src="screenshots/phone-dark.png" alt="" aria-hidden="true" width="400" height="800" />
 
       <div class="float-badge b1">
         <span class="dot" style="background:var(--gold-soft);color:var(--gold-deep)">
@@ -633,7 +659,7 @@ html.shot .phone{animation:none!important;transform:none!important;width:320px!i
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 7v6c0 4.5 3.2 7.6 8 8.5 4.8-.9 8-4 8-8.5V7Z"/><path d="m9 12 2 2 4-4"/></svg>
         </div>
         <h3>没有网络权限</h3>
-        <p>墨屿未申请 <code>INTERNET</code> 权限，系统层面不具备联网能力。书架、进度与笔记不会被外传。</p>
+        <p>墨屿未申请 <code>INTERNET</code> 权限，系统层面不具备联网能力。书架、进度与书签不会被外传。</p>
       </article>
 
       <article class="pillar reveal" style="--i:1">
@@ -770,7 +796,7 @@ html.shot .phone{animation:none!important;transform:none!important;width:320px!i
 
   /* ---------- Hero 首屏动画 ---------- */
   requestAnimationFrame(function () {
-    setTimeout(function () { document.querySelector(".hero").classList.add("ready"); }, 120);
+    requestAnimationFrame(function () { document.querySelector(".hero").classList.add("ready"); });
   });
 
   /* ---------- 跑马灯：复制一份实现无缝循环 ---------- */

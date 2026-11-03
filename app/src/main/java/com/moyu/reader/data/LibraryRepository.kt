@@ -233,6 +233,12 @@ class LibraryRepository(context: Context) {
     suspend fun migrateTextBookmarks(book: BookEntity, totalChars: Int) = withContext(Dispatchers.IO) {
         if (book.textAnchors != 0 || book.format == FORMAT_PDF) return@withContext
         val pages = databaseOperation { dao.legacyBookmarkPages(book.id) }
+        // A stale flag with no page marks means the book already uses character anchors. Clearing
+        // the text marks here would delete every bookmark the reader has been adding since.
+        if (pages.isEmpty()) {
+            databaseOperation { dao.markTextAnchors(book.id) }
+            return@withContext
+        }
         val count = book.pageCount.coerceAtLeast(1)
         val offsets = pages.map { page ->
             (page.toLong() * totalChars / count).toInt().coerceIn(0, (totalChars - 1).coerceAtLeast(0))

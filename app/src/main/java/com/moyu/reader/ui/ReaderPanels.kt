@@ -113,15 +113,14 @@ internal data class PdfViewState(
 /** Tool strip under the slider; text books trade the thumbnail grid for contents and typesetting. */
 @Composable
 internal fun ReaderToolRow(
-    pdfPage: Int,
-    bookmarks: List<Int>,
+    bookmarked: Boolean,
     isText: Boolean,
     mode: String,
     brightness: Float,
     onPanel: (ReaderPanel) -> Unit,
 ) {
     Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
-        ReaderTool(Icons.Rounded.Bookmark, "书签", pdfPage in bookmarks, Modifier.weight(1f)) {
+        ReaderTool(Icons.Rounded.Bookmark, "书签", bookmarked, Modifier.weight(1f)) {
             onPanel(ReaderPanel.Bookmarks)
         }
         if (isText) {
@@ -229,22 +228,22 @@ internal fun ViewPanel(state: PdfViewState, onPick: (Boolean) -> Unit, onRetry: 
 @Composable
 internal fun BookmarksPanel(
     bookmarks: List<Int>,
-    currentPage: Int,
+    currentMark: Int,
+    currentMarked: Boolean,
     onToggle: (Int) -> Unit,
     onJump: (Int) -> Unit,
     label: (Int) -> String = { page -> "第 ${page + 1} 页" },
 ) {
     Column(Modifier.fillMaxWidth()) {
-        val marked = currentPage in bookmarks
         PaperSheetRow(
-            if (marked) Icons.Rounded.Bookmark else Icons.Rounded.BookmarkBorder,
-            if (marked) "移除本页书签 · ${label(currentPage)}"
-            else "添加本页书签 · ${label(currentPage)}",
-            { onToggle(currentPage) },
+            if (currentMarked) Icons.Rounded.Bookmark else Icons.Rounded.BookmarkBorder,
+            if (currentMarked) "移除当前位置书签 · ${label(currentMark)}"
+            else "添加当前位置书签 · ${label(currentMark)}",
+            { onToggle(currentMark) },
         )
         PaperDivider(Modifier.padding(horizontal = 20.dp))
         if (bookmarks.isEmpty()) {
-            PanelHint("暂无书签。翻到想留住的页面，可在这里添加。")
+            PanelHint("暂无书签。翻到想留住的位置，可在这里添加。")
         } else {
             LazyColumn(Modifier.fillMaxWidth().heightIn(max = 260.dp)) {
                 items(bookmarks, key = { it }) { page ->

@@ -131,13 +131,14 @@ abstract class LibraryDao {
         if (adding) requireBackupCapacity()
     }
 
-    /** Converts page marks to character anchors once; old rows are dropped afterwards. */
+    /** Converts page marks to character anchors once; existing character marks are kept. */
     @Transaction
     open suspend fun adoptTextBookmarks(id: String, offsets: List<Int>) {
         MetadataRules.bookId(id)
         val book = getBook(id) ?: return
         clearBookmarks(id)
-        clearTextBookmarks(id)
+        // A reader may already have added character marks after the migration flag was lost.
+        // Converting the old page marks must add anchors, never delete newer ones.
         offsets.distinct().take(MetadataRules.MAX_BOOKMARKS).forEach {
             insertTextBookmark(TextBookmarkEntity(id, it.coerceAtLeast(0)))
         }
@@ -184,7 +185,9 @@ abstract class LibraryDao {
         val boundedTextPage = if (boundedTextCount > 0) textPage.coerceIn(0, boundedTextCount - 1) else 0
         val boundedTextOffset = textOffset.coerceIn(0, Int.MAX_VALUE)
         val boundedTextProgress = textProgress.coerceIn(0, 100)
-        val anchors = textAnchors.coerceIn(0, 1)
+        // A stale in-memory row must never downgrade the one-time conversion flag; otherwise the
+        // next open would migrate again and could clear the reader's character bookmarks.
+        val anchors = maxOf(book.textAnchors, textAnchors.coerceIn(0, 1))
         if (book.currentPage == boundedPage && book.pageOffset == boundedOffset && book.mode == mode &&
             book.readView == view && book.textPage == boundedTextPage && book.textPageCount == boundedTextCount &&
             book.textOffset == boundedTextOffset && book.textProgress == boundedTextProgress &&

@@ -263,15 +263,18 @@ internal class ReaderViewportState(val list: LazyListState, val pager: PagerStat
         if (canZoom()) pendingReset?.let { toggleZoom(it) }
     }
 
-    /** Replace, rather than follow, any queued pinch anchor. Used by jump and mode changes. */
-    fun resetForJump(page: Int) {
+    /** Replace, rather than follow, any queued pinch anchor. Used by jumps, mode changes and restore. */
+    fun resetForJump(page: Int, scrollOffset: Int = 0) {
         fling?.cancel()
         pendingReset = null
         ownedPagerPage = null
         zoom = 1f
         pan = Offset.Zero
-        pendingAnchor = if (vertical) page to 0f else null
-        list.requestScrollToItem(page, 0)
+        val offset = scrollOffset.coerceAtLeast(0)
+        // This also gates position reports until the requested page has been measured. Without
+        // the gate a horizontal pager could report its old settled page before the jump lands.
+        pendingAnchor = page to offset.toFloat()
+        list.requestScrollToItem(page, offset)
         if (!vertical) pager.requestScrollToPage(page, 0f)
     }
 

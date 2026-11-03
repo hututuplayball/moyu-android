@@ -10,6 +10,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
@@ -99,6 +100,7 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -231,12 +233,12 @@ fun LibraryScreen(
     var pageWidth by remember { mutableStateOf(0) }
     // The shelf area's own height, kept so the empty page does not resize while it slides in.
     var contentHeight by remember { mutableStateOf(0) }
-    var forward by remember { mutableStateOf(true) }
     var firstSlide by remember { mutableStateOf(true) }
     var firstKind by remember { mutableStateOf(true) }
     // A kind switch drops the open shelf; that scope reset must not also slide the whole page.
     var skipScopeSlide by remember { mutableStateOf(false) }
-    val pageSlide = remember { Animatable(0f) }
+    var pageSlide by remember { mutableStateOf(0f) }
+    val slideAnimation = remember { Animatable(0f) }
     val reduceMotion = LocalMoyuReduceMotion.current
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
@@ -368,7 +370,14 @@ fun LibraryScreen(
         if (target == scopeId) return
         leaveOrganize()
         closeSearch()
-        forward = target != null
+        // Set the entry offset in the same frame as the scope change. Snapping inside
+        // LaunchedEffect used to show one frame at 0 first, which read as a jitter.
+        pageSlide = if (!firstSlide && !reduceMotion && pageWidth > 0) {
+            pageWidth * 0.22f * if (target != null) 1f else -1f
+        } else 0f
+        // A group opens at its first row. Requesting the reset before the scope change lets the
+        // first composition measure there, instead of showing the old scroll offset for a frame.
+        if (target != null) shelfGridState.requestScrollToItem(0)
         scopeId = target
     }
 
@@ -572,21 +581,23 @@ fun LibraryScreen(
     LaunchedEffect(scopeKey) {
         if (firstSlide) {
             firstSlide = false
-            pageSlide.snapTo(0f)
+            pageSlide = 0f
             return@LaunchedEffect
         }
         if (skipScopeSlide) {
             skipScopeSlide = false
-            pageSlide.snapTo(0f)
+            pageSlide = 0f
             return@LaunchedEffect
         }
         if (reduceMotion || pageWidth == 0) {
-            pageSlide.snapTo(0f)
+            pageSlide = 0f
             return@LaunchedEffect
         }
-        val shift = pageWidth * 0.22f
-        pageSlide.snapTo(if (forward) shift else -shift)
-        pageSlide.animateTo(0f, tween(240, easing = FastOutSlowInEasing))
+        if (pageSlide == 0f) return@LaunchedEffect
+        slideAnimation.snapTo(pageSlide)
+        slideAnimation.animateTo(0f, tween(240, easing = FastOutSlowInEasing)) {
+            pageSlide = value
+        }
     }
     LaunchedEffect(kind) {
         // The first composition is a launch, not a switch: nothing to reset and nothing to move.
@@ -599,6 +610,7 @@ fun LibraryScreen(
         selection = emptySet()
         if (scopeId != null) {
             skipScopeSlide = true
+            pageSlide = 0f
             scopeId = null
         }
     }
@@ -609,9 +621,6 @@ fun LibraryScreen(
     LaunchedEffect(kindPagerState.settledPage) {
         val pageKind = if (kindPagerState.settledPage == 0) KIND_COMIC else KIND_EBOOK
         if (pageKind != kind) onKind(pageKind)
-    }
-    LaunchedEffect(scopeId) {
-        if (scopeId != null) shelfGridState.scrollToItem(0)
     }
     LaunchedEffect(gestureScope, organizing, shelfIds) {
         if (drag?.let { it.scope != gestureScope || !organizing || it.book.id !in shelfIds } == true) cancelDrag()
@@ -657,47 +666,64 @@ fun LibraryScreen(
 
     Scaffold(containerColor = MaterialTheme.colorScheme.background, contentWindowInsets = WindowInsets.safeDrawing) { insets ->
         Box(Modifier.fillMaxSize().padding(insets).onSizeChanged { pageWidth = it.width }) {
-            Column(Modifier.fillMaxSize().graphicsLayer { translationX = pageSlide.value }) {
-                if (scopeId == null) {
-                    RootHeader(
-                        searchVisible = searchVisible,
-                        query = query,
-                        importing = importing,
-                        requestFocus = requestSearchFocus,
-                        onQuery = { query = it },
-                        onSearchToggle = {
-                            if (searchVisible) closeSearch() else {
-                                searchVisible = true
-                                requestSearchFocus = true
-                            }
-                        },
-                        onFocusHandled = { requestSearchFocus = false },
-                        onImport = openImport,
-                        onSettings = onSettings,
-                    )
-                    LibraryKindSwitch(
-                        pagerState = kindPagerState,
-                        comicCount = comicCount,
-                        ebookCount = ebookCount,
-                        onSelect = { if (it != kind) onKind(it) },
-                    )
-                } else {
-                    ShelfHeader(
-                        title = title,
-                        count = shelfBooks.size,
-                        organizing = organizing,
-                        orderBusy = order.busy,
-                        hasGroup = activeGroup != null,
-                        onBack = { navigate(null) },
-                        onActions = { groupActionsId = activeGroup?.id },
-                        onToggleOrganize = {
-                            if (organizing) leaveOrganize() else {
-                                organizing = true
-                                focusManager.clearFocus()
-                                keyboard?.hide()
-                            }
-                        },
-                    )
+            Column(Modifier.fillMaxSize().graphicsLayer {
+                translationX = pageSlide
+                // A scope change swaps a short shelf header for the taller root header in one
+                // frame. Fading the incoming page while it slides keeps that swap from reading
+                // as a jolt, even on a slow device.
+                val slide = if (pageWidth > 0) pageSlide / (pageWidth * 0.22f) else 0f
+                alpha = 1f - (slide * slide).coerceIn(0f, 1f) * 0.35f
+            }) {
+                // The headers differ in height. Animating that height moves the grid smoothly
+                // instead of dropping it by a header's worth the instant the scope changes.
+                Box(
+                    Modifier.fillMaxWidth()
+                        .animateContentSize(if (reduceMotion) snap() else tween(240, easing = FastOutSlowInEasing))
+                        .clipToBounds(),
+                ) {
+                    if (scopeId == null) {
+                        Column(Modifier.fillMaxWidth()) {
+                            RootHeader(
+                                searchVisible = searchVisible,
+                                query = query,
+                                importing = importing,
+                                requestFocus = requestSearchFocus,
+                                onQuery = { query = it },
+                                onSearchToggle = {
+                                    if (searchVisible) closeSearch() else {
+                                        searchVisible = true
+                                        requestSearchFocus = true
+                                    }
+                                },
+                                onFocusHandled = { requestSearchFocus = false },
+                                onImport = openImport,
+                                onSettings = onSettings,
+                            )
+                            LibraryKindSwitch(
+                                pagerState = kindPagerState,
+                                comicCount = comicCount,
+                                ebookCount = ebookCount,
+                                onSelect = { if (it != kind) onKind(it) },
+                            )
+                        }
+                    } else {
+                        ShelfHeader(
+                            title = title,
+                            count = shelfBooks.size,
+                            organizing = organizing,
+                            orderBusy = order.busy,
+                            hasGroup = activeGroup != null,
+                            onBack = { navigate(null) },
+                            onActions = { groupActionsId = activeGroup?.id },
+                            onToggleOrganize = {
+                                if (organizing) leaveOrganize() else {
+                                    organizing = true
+                                    focusManager.clearFocus()
+                                    keyboard?.hide()
+                                }
+                            },
+                        )
+                    }
                 }
                 Box(
                     Modifier.fillMaxWidth().weight(1f)

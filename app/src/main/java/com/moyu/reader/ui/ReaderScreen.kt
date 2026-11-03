@@ -150,6 +150,13 @@ fun ReaderScreen(
     var pdfTextReprobed by remember(book.id) { mutableStateOf(false) }
     // A char offset captured before a view switch; the new layout maps it back to a page.
     var pendingOffset by remember(book.id) { mutableStateOf<Long?>(null) }
+    // A char target pending a fresh chapter window; it bypasses the typesetting debounce.
+    var chapterJump by remember(book.id) { mutableStateOf(false) }
+    // A separate revision for a chapter/seek reopen; retry also invalidates the parsed document.
+    var openRevision by remember(book.id) { mutableIntStateOf(0) }
+    // The page pixel derived from the saved line anchor for the next text window. It is also the
+    // page offset used by non-text sources when no text anchor exists.
+    var restoreScroll by remember(book.id) { mutableIntStateOf(book.pageOffset) }
     val scope = rememberCoroutineScope()
     // Retiring a page source suspends on IO, while the composition that owned it may already be gone.
     val closer = remember { CoroutineScope(SupervisorJob() + Dispatchers.IO) }
@@ -285,19 +292,23 @@ fun ReaderScreen(
         }
         pdfTextState = state
     }
-    LaunchedEffect(book.id, retry, textSettings, isText) {
+    LaunchedEffect(book.id, retry, openRevision, textSettings, isText) {
+        // Consume the jump request before any suspension: a newer jump restarts this effect, and
+        // its own request must never be cleared by the effect it cancelled.
+        val jumping = chapterJump
+        chapterJump = false
         error = null
         // A theme switch keeps every line break, so repaint in place instead of rebuilding the book.
         val active = session as? TextPageSource
         val settings = textSettings
-        if (active != null && settings != null && active.keepsLayoutFor(settings)) {
+        if (active != null && settings != null && active.keepsLayoutFor(settings) && !jumping) {
             pendingOffset = null
             active.restyle(settings.theme)
             return@LaunchedEffect
         }
         // A long book measures every paragraph again. While an older layout is on screen, wait for
         // the taps to settle so a run of A+/A- costs one measurement instead of one per tap.
-        if (active != null) {
+        if (active != null && !jumping) {
             delay(REFLOW_SETTLE_MS)
         }
         var pending: PageSource? = null
@@ -332,16 +343,22 @@ fun ReaderScreen(
                     text.jumpToOffset(readingOffset.toInt())
                 }
             }
+            // The line anchor is the only stored text position. The page and its pixel offset are
+            // derived from the freshly built layout, never from a pixel saved in an older layout.
+            val openedPosition = text?.positionForCharOffset(readingOffset.toInt(), textPage.width)
             val startPage = if (text != null) {
-                text.pageForCharOffset(readingOffset).coerceIn(0, opened.pageCount - 1)
+                (openedPosition?.page ?: text.pageForCharOffset(readingOffset))
+                    .coerceIn(0, opened.pageCount - 1)
             } else {
                 current.currentPage.coerceIn(0, opened.pageCount - 1)
             }
+            val startScroll = if (text != null) openedPosition?.pageOffset ?: 0 else current.pageOffset
             val startSize = opened.pageSize(startPage)
             // Publishing is the final step, so a failed reopen leaves the previous layout readable.
             val previous = session
             pending = null
             restoredSize = startSize
+            restoreScroll = startScroll.coerceAtLeast(0)
             restorePage = if (text != null) startPage else null
             pendingOffset = null
             session = opened
@@ -362,6 +379,15 @@ fun ReaderScreen(
         } finally {
             // A source that was cancelled before it reached the UI is released here instead.
             pending?.let { stale -> closer.launch { stale.close() } }
+        }
+    }
+    // Every explicit chapter/seek jump opens a fresh one-chapter window at the target anchor.
+    // Nothing in the old window survives, so page indices, caches and labels cannot mix snapshots.
+    val openAtChar: (Int) -> Unit = { offset ->
+        if (session is TextPageSource) {
+            chapterJump = true
+            pendingOffset = offset.toLong()
+            openRevision++
         }
     }
     // Settings changes reopen the text layout; the captured offset keeps the reading spot.
@@ -413,7 +439,19 @@ fun ReaderScreen(
                 }
             },
             onBack, onPosition, onBookmark, onBrightness, onRightToLeft,
-            handleTextSettings, onTextPosition, onRestoreConsumed = { restorePage = null })
+            handleTextSettings, onTextPosition,
+            initialScroll = restoreScroll,
+            onRestoreConsumed = { restorePage = null },
+            onChapterJump = { chapter ->
+                (session as? TextPageSource)?.let { openAtChar(it.chapterStartOffset(chapter)) }
+            },
+            onSeek = { percent ->
+                (session as? TextPageSource)?.let {
+                    openAtChar((it.characterCount.toLong() * percent.coerceIn(0, 100) / 100).toInt())
+                }
+            },
+            onAnchorJump = openAtChar,
+        )
     } else Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         if (error == null) CircularProgressIndicator()
         else Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -482,23 +520,35 @@ private fun ReaderContent(
     onRightToLeft: (Boolean) -> Unit,
     onTextSettings: (TextReadingSettings, Long) -> Unit,
     onTextPosition: (Int, Int) -> Unit,
+    initialScroll: Int,
     onRestoreConsumed: () -> Unit,
+    onChapterJump: (Int) -> Unit,
+    onSeek: (Int) -> Unit,
+    onAnchorJump: (Int) -> Unit,
 ) {
     val restoredPage = remember(book.id) { book.currentPage }
     var mode by rememberSaveable(book.id) { mutableStateOf(book.mode.ifBlank { preferences.defaultMode }) }
     val initialPage = (restorePage ?: book.currentPage).coerceIn(0, session.pageCount - 1)
-    var currentPage by rememberSaveable(book.id) { mutableIntStateOf(initialPage) }
+    var currentPage by remember(session, book.id) { mutableIntStateOf(initialPage) }
     // A chapter window grows when the reader reaches its edge; Compose must observe the new count.
     var pagesVersion by remember(session) { mutableIntStateOf(0) }
     val pageCount = remember(session, pagesVersion) { session.pageCount }
     var pendingJump by remember(session) { mutableStateOf<Int?>(null) }
-    var offset by rememberSaveable(book.id) { mutableIntStateOf(book.pageOffset) }
+    // A chapter window prepend shifts page indices; this keeps the visible in-page pixel with it.
+    var pendingJumpScroll by remember(session) { mutableIntStateOf(0) }
+    var offset by remember(session, book.id) { mutableIntStateOf(initialScroll) }
     var chrome by remember(book.id) { mutableStateOf(false) }
     var panel by remember(book.id) { mutableStateOf<ReaderPanel?>(null) }
     var slider by remember { mutableStateOf<Float?>(null) }
     // The slider keeps the requested spot while the target chapter is being loaded, so the thumb
     // and the chapter label never fall back to the previous page mid-jump.
     var pendingPercent by remember { mutableStateOf<Float?>(null) }
+    LaunchedEffect(session) {
+        // A fresh chapter window has already applied the requested anchor; drop the temporary
+        // slider label so the panel reads the exact new page position.
+        pendingPercent = null
+        slider = null
+    }
     // A view switch already knows its target page, so the new layout starts there without a flash.
     val startPage = (restorePage ?: currentPage).coerceIn(0, pageCount - 1)
     val listState = key(session) { rememberLazyListState(startPage, offset) }
@@ -561,36 +611,68 @@ private fun ReaderContent(
         viewport.resetForJump(target)
         if (mode != "vertical") scope.launch { pagerState.scrollToPage(target) }
     }
-    // A chapter load can change the window and its page indices; this publishes the new page first.
-    val applyJump: (Int) -> Unit = { page ->
-        pagesVersion++
-        pendingJump = page.coerceAtLeast(0)
-    }
-    val jumpProgress: (Int) -> Unit = { percent ->
-        val source = session as? TextPageSource
-        if (source == null) jump(percent) else scope.launch {
-            val offset = (source.characterCount.toLong() * percent.coerceIn(0, 100) / 100).toInt()
-            val page = source.jumpToOffset(offset)
-            applyJump(page)
-        }
-    }
     // Panels close themselves through this wrapper, so no panel has to know about chrome state.
     val jumpAndClose: (Int) -> Unit = { page -> jump(page); panel = null }
     val textSource = session as? TextPageSource
+    // Pure text marks are character anchors: window pages disappear when type or chapter changes.
+    val pureText = book.format == FORMAT_TEXT || book.format == FORMAT_EPUB
+    val offsetMarks = pureText && textSource != null
+    // The one formula every text position goes through: page + in-page pixel -> first visible line.
+    val anchorAt: (TextPageSource, Int, Int, Boolean) -> Int = { source, page, scroll, vertical ->
+        if (vertical) {
+            source.charOffsetAtPageOffset(page, scroll, viewport.viewport.width)
+        } else {
+            source.charOffsetOfPage(page).toInt()
+        }
+    }
+    // Read the live line only when the chrome opens or a setting changes, not on every scroll
+    // frame. Persistence uses the same formula directly in reportPosition.
+    val currentLineAnchorNow: () -> Int = {
+        val source = textSource
+        if (source != null) {
+            val page = if (mode == "vertical") listState.firstVisibleItemIndex else pagerState.currentPage
+            anchorAt(
+                source,
+                page,
+                normalizedPageOffset(listState.firstVisibleItemScrollOffset, viewport.measuredZoom),
+                mode == "vertical",
+            )
+        } else 0
+    }
+    // The frozen anchor shown by the open toolbar. It is captured when the chrome is revealed.
+    var chromeAnchor by remember(session, book.id) { mutableIntStateOf(0) }
+    // A bookmark whose saved anchor maps to the current line in the current layout.
+    val bookmarkAtLine: (Int) -> Int? = { anchor ->
+        if (offsetMarks) {
+            textSource!!.let { source ->
+                bookmarks.firstOrNull { source.lineAnchorInWindow(it) == anchor }
+            }
+        } else null
+    }
+    var chromeLineMark by remember(session, book.id) { mutableStateOf<Int?>(null) }
+    LaunchedEffect(chrome, session, currentPage, mode, pagesVersion, bookmarks) {
+        if (chrome) {
+            val anchor = currentLineAnchorNow()
+            chromeAnchor = anchor
+            chromeLineMark = bookmarkAtLine(anchor)
+        } else {
+            chromeLineMark = null
+        }
+    }
     // Pages are replaced when a chapter is loaded; the revision must invalidate the cached percent,
     // otherwise a TOC jump that lands on the same page index leaves the old chapter label on screen.
-    val textPagePercent = remember(textSource, currentPage, pageCount, pagesVersion) {
-        textSource?.progressPercentOfPage(currentPage) ?: 0
+    val textPageFraction = remember(textSource, chromeAnchor, currentPage, pageCount, pagesVersion) {
+        textSource?.progressFractionForOffset(chromeAnchor) ?: 0f
     }
     // Bookmarks, progress and the page label stay in PDF pages, whichever view is on screen.
     val pdfPage = if (pdfTextView && pdfAnchors != null && textSource != null) {
-        PdfTextLayout.pageForOffset(pdfAnchors, textSource.charOffsetOfPage(currentPage).toInt())
+        PdfTextLayout.pageForOffset(pdfAnchors, chromeAnchor)
     } else currentPage
     val jumpPdfPage: (Int) -> Unit = { page ->
         val source = textSource
         if (pdfTextView && pdfAnchors != null && source != null) {
             val offset = PdfTextLayout.offsetOfPage(pdfAnchors, page)
-            scope.launch { applyJump(source.jumpToOffset(offset)) }
+            onAnchorJump(offset)
         } else jump(page)
     }
     val jumpPdfAndClose: (Int) -> Unit = { page -> jumpPdfPage(page); panel = null }
@@ -601,10 +683,11 @@ private fun ReaderContent(
             textSource.pageForCharOffset(PdfTextLayout.offsetOfPage(anchors, page).toLong()) + 1
         } else page + 1
     }
-    // Pure text marks are character anchors: window pages disappear when type or chapter changes.
-    val pureText = book.format == FORMAT_TEXT || book.format == FORMAT_EPUB
-    val offsetMarks = pureText && textSource != null
-    val currentMarker = if (offsetMarks) textSource!!.charOffsetOfPage(currentPage).toInt() else pdfPage
+    // Marks use the same line anchor as progress, so different lines in one page can be bookmarked.
+    // A saved anchor is mapped through the current layout, so a bookmark still lights up the line
+    // that contains it after a font or line-spacing change.
+    val currentMarker = if (offsetMarks) chromeLineMark ?: chromeAnchor else pdfPage
+    val currentMarked = if (offsetMarks) chromeLineMark != null else currentMarker in bookmarks
     val markLabel: (Int) -> String = if (textSource != null && (pureText || pdfTextView)) {
         { mark ->
             if (pureText) {
@@ -618,15 +701,7 @@ private fun ReaderContent(
         { page -> "第 ${bookmarkPageNumber(page)} 页" }
     }
     val jumpMarker: (Int) -> Unit = if (offsetMarks) {
-        { offset ->
-            scope.launch {
-                val target = textSource?.jumpToOffset(offset)
-                if (target != null) {
-                    applyJump(target)
-                    panel = null
-                }
-            }
-        }
+        { offset -> onAnchorJump(offset); panel = null }
     } else jumpPdfAndClose
     // A text page knows its exact char anchor, so switching views never loses the reading spot.
     val switchView: (Boolean) -> Unit = { wanted ->
@@ -635,7 +710,7 @@ private fun ReaderContent(
             val offset = if (wanted && anchors != null) {
                 PdfTextLayout.offsetOfPage(anchors, pdfPage).toLong()
             } else {
-                textSource?.charOffsetOfPage(currentPage) ?: 0L
+                if (textSource != null) currentLineAnchorNow().toLong() else 0L
             }
             onSwitchView(wanted, offset)
         }
@@ -644,15 +719,17 @@ private fun ReaderContent(
     val reportPosition: (Int, Int, String) -> Unit = { page, scroll, mode ->
         val source = textSource
         if (source != null) {
-            val offset = source.charOffsetOfPage(page)
-            textPositionCallback(offset.toInt(), source.progressPercentOfPage(page))
+            // The anchor is the first visible line, not the first character of the page. The page
+            // pixel is never stored as the position; it is derived from this anchor on restore.
+            val anchor = anchorAt(source, page, scroll, mode == "vertical")
             val anchors = if (pdfTextView) pdfAnchors else null
             if (anchors != null) {
-                positionCallback(PdfTextLayout.pageForOffset(anchors, offset.toInt()), 0, mode)
+                positionCallback(PdfTextLayout.pageForOffset(anchors, anchor), 0, mode)
             } else {
                 // Pages are window-local; only the mode belongs to the PDF progress row now.
                 positionCallback(0, 0, mode)
             }
+            textPositionCallback(anchor, source.progressPercentForOffset(anchor))
         } else {
             positionCallback(page, scroll, mode)
         }
@@ -661,20 +738,28 @@ private fun ReaderContent(
     val changeText: ((TextReadingSettings) -> TextReadingSettings) -> Unit = { transform ->
         val current = textSettings
         if (current != null) {
-            val offset = (session as? TextPageSource)?.charOffsetOfPage(currentPage) ?: 0L
+            val offset = if (session is TextPageSource) currentLineAnchorNow().toLong() else 0L
             onTextSettings(transform(current), offset)
         }
     }
     // The settle collector runs a frame after the page stops; leaving must save the page that is
     // actually on screen or a quick exit records the previous page.
     val saveVisiblePosition by rememberUpdatedState {
-        if (restorePage == null && pendingJump == null && pageCount > 0) {
-            val page = if (mode == "vertical") listState.firstVisibleItemIndex else pagerState.currentPage
+        if (restorePage == null && pageCount > 0) {
+            val jump = pendingJump
+            val page = when {
+                mode == "vertical" -> jump ?: listState.firstVisibleItemIndex
+                // targetPage is where the pager was heading when the user left, so a quick exit
+                // during the snap animation does not record the previous page.
+                jump != null -> jump
+                else -> pagerState.targetPage
+            }
             val safePage = page.coerceIn(0, pageCount - 1)
-            val scroll = if (mode == "vertical") {
-                normalizedPageOffset(listState.firstVisibleItemScrollOffset, viewport.measuredZoom)
-            } else {
-                0
+            val scroll = when {
+                mode != "vertical" -> 0
+                // A chapter prepend has already shifted the page index but not yet settled.
+                jump != null -> pendingJumpScroll
+                else -> normalizedPageOffset(listState.firstVisibleItemScrollOffset, viewport.measuredZoom)
             }
             reportPosition(safePage, scroll, mode)
         }
@@ -687,12 +772,15 @@ private fun ReaderContent(
         contentLifecycleOwner.lifecycle.addObserver(observer)
         onDispose { contentLifecycleOwner.lifecycle.removeObserver(observer) }
     }
-    LaunchedEffect(restorePage, mode) {
+    LaunchedEffect(restorePage, mode, initialScroll) {
         val target = restorePage ?: return@LaunchedEffect
-        // Override any saved window page before the first position report can observe it.
+        val restoredOffset = if (mode == "vertical") initialScroll.coerceAtLeast(0) else 0
+        // Never suspend here. A user scroll cancels a programmatic scrollToItem/scrollToPage,
+        // which used to cancel this effect before onRestoreConsumed(); restorePage then stayed
+        // non-null forever, disabling both position reports and next-chapter loading.
         currentPage = target
-        viewport.resetForJump(target)
-        if (mode == "vertical") listState.scrollToItem(target, offset) else pagerState.scrollToPage(target)
+        offset = restoredOffset
+        viewport.resetForJump(target, restoredOffset)
         onRestoreConsumed()
     }
     // Reading uses its own brightness; leaving the reader hands the window back to the system.
@@ -726,7 +814,9 @@ private fun ReaderContent(
         // No page report may race the restore jump: otherwise page zero can overwrite the anchor.
         if (restorePage != null) return@LaunchedEffect
         if (mode == "vertical") {
-            listState.scrollToItem(currentPage.coerceIn(0, pageCount - 1), offset)
+            // The list was created with the restored page/offset and resetForJump has already
+            // requested it. Do not call a suspend scroll here either: a user drag would cancel
+            // the effect before the snapshotFlow below could ever start.
             snapshotFlow {
                 if (pendingJump != null || viewport.hasPendingAnchor) null
                 else listState.firstVisibleItemIndex to
@@ -740,7 +830,6 @@ private fun ReaderContent(
                 }
             }
         } else {
-            pagerState.scrollToPage(currentPage.coerceIn(0, pageCount - 1))
             snapshotFlow {
                 if (pendingJump != null || viewport.hasPendingAnchor) null
                 else pagerState.settledPage
@@ -766,27 +855,40 @@ private fun ReaderContent(
         if (restorePage != null) return@LaunchedEffect
         val source = session as? TextPageSource ?: return@LaunchedEffect
         if (currentPage >= pageCount - 2 && source.hasNextChapter()) {
-            val added = source.loadNextChapter()
+            // An empty chapter can paginate to zero pages. Keep advancing through such chapters
+            // instead of letting one zero-page slice permanently stop the window at its edge.
+            var added = 0
+            while (added == 0 && source.hasNextChapter()) {
+                added = source.loadNextChapter()
+            }
             if (added > 0) pagesVersion++
         }
         if (currentPage <= 1 && source.hasPreviousChapter()) {
-            val added = source.loadPreviousChapter()
+            val keepScroll = offset
+            var added = 0
+            while (added == 0 && source.hasPreviousChapter()) {
+                added = source.loadPreviousChapter()
+            }
             if (added > 0) {
                 pagesVersion++
                 currentPage += added
                 pendingJump = currentPage
+                // Page indices shifted, the line on screen did not: carry its pixel offset.
+                pendingJumpScroll = keepScroll
             }
         }
     }
     LaunchedEffect(pendingJump, pageCount, mode) {
         val target = pendingJump ?: return@LaunchedEffect
         if (target !in 0 until pageCount) return@LaunchedEffect
+        val targetScroll = if (mode == "vertical") pendingJumpScroll else 0
         currentPage = target
-        offset = 0
-        viewport.resetForJump(target)
-        if (mode == "vertical") listState.scrollToItem(target, 0)
-        else pagerState.scrollToPage(target)
+        offset = targetScroll
+        // resetForJump only requests a scroll; it never suspends and can therefore never be
+        // cancelled by a user drag before pendingJump is cleared.
+        viewport.resetForJump(target, targetScroll)
         pendingJump = null
+        pendingJumpScroll = 0
     }
     // Edge-back unwinds the panel first, so the drawer never traps the gesture or leaves the book unexpectedly.
     BackHandler {
@@ -806,7 +908,16 @@ private fun ReaderContent(
             when {
                 mode == "horizontal" && viewport.zoom <= 1.01f && fraction < .23f -> jump(currentPage + if (preferences.rightToLeft) 1 else -1)
                 mode == "horizontal" && viewport.zoom <= 1.01f && fraction > .77f -> jump(currentPage + if (preferences.rightToLeft) -1 else 1)
-                else -> chrome = !chrome
+                else -> {
+                    // Freeze the line before opening the toolbar so the first panel frame already
+                    // shows the correct chapter, bookmark state and progress.
+                    if (!chrome) {
+                        val anchor = currentLineAnchorNow()
+                        chromeAnchor = anchor
+                        chromeLineMark = bookmarkAtLine(anchor)
+                    }
+                    chrome = !chrome
+                }
             }
         }, onGesture = { chrome = false }) { baseSize, bounds, zoom, expanded ->
             PrefetchPages(session, currentPage, pageCount, baseSize, mode, scrolling, zoom, prefetchRadius)
@@ -921,16 +1032,17 @@ private fun ReaderContent(
                             val shownPage = (slider?.roundToInt() ?: currentPage)
                                 .coerceIn(0, pageCount - 1)
                             val shownProgress = if (source != null) {
-                                (pendingPercent ?: slider ?: textPagePercent.toFloat())
+                                (pendingPercent ?: slider ?: textPageFraction)
                                     .coerceIn(0f, 100f)
                             } else null
                             Row(Modifier.fillMaxWidth().padding(horizontal = 22.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                                 Text(
                                     when {
-                                        source != null && shownProgress != null -> {
-                                            val offset = (source.characterCount.toLong() * shownProgress / 100f).toInt()
+                                        source != null && (pendingPercent != null || slider != null) -> {
+                                            val offset = (source.characterCount.toLong() * shownProgress!! / 100f).toInt()
                                             source.chapterTitleForOffset(offset) ?: "正文"
                                         }
+                                        source != null -> source.chapterTitleForOffset(chromeAnchor) ?: "正文"
                                         else -> "${shownPage + 1} / ${pageCount}"
                                     },
                                     maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -956,7 +1068,7 @@ private fun ReaderContent(
                                                 // Keep the requested position visible while the
                                                 // target chapter page is being loaded.
                                                 pendingPercent = value
-                                                jumpProgress(value.roundToInt())
+                                                onSeek(value.roundToInt())
                                             } else {
                                                 jump(value.roundToInt())
                                             }
@@ -968,8 +1080,7 @@ private fun ReaderContent(
                                 )
                             }
                             ReaderToolRow(
-                                pdfPage = currentMarker,
-                                bookmarks = bookmarks,
+                                bookmarked = currentMarked,
                                 isText = isText,
                                 mode = mode,
                                 brightness = brightness,
@@ -978,7 +1089,8 @@ private fun ReaderContent(
                         }
                         ReaderPanel.Bookmarks -> BookmarksPanel(
                             bookmarks = bookmarks,
-                            currentPage = currentMarker,
+                            currentMark = currentMarker,
+                            currentMarked = currentMarked,
                             onToggle = onBookmark,
                             onJump = jumpMarker,
                             label = markLabel,
@@ -996,11 +1108,8 @@ private fun ReaderContent(
                             val source = textSource
                             if (source != null) {
                                 ChapterPanel(source, source.chapterIndexForPage(currentPage)) { chapter ->
-                                    scope.launch {
-                                        val page = source.jumpToChapter(chapter)
-                                        applyJump(page)
-                                        panel = null
-                                    }
+                                    panel = null
+                                    onChapterJump(chapter)
                                 }
                             }
                         }

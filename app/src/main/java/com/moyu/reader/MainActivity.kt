@@ -215,7 +215,9 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
-        model?.onAppStopped()
+        // Compose lifecycle observers record the visible line synchronously in super.onStop().
+        // Flushing first used to persist the previous line before the current one was reported.
         super.onStop()
+        model?.onAppStopped()
     }
 }

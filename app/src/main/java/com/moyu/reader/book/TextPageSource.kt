@@ -42,6 +42,8 @@ class TextPageSource private constructor(
     data class Segment(val paragraph: Int, val startLine: Int, val lineCount: Int)
     class TextPage(val segments: List<Segment>, val startChar: Int)
     data class TocEntry(val title: String, val page: Int)
+    /** A line anchor and the page position that brings that line to the top of the viewport. */
+    data class TextPosition(val page: Int, val pageOffset: Int, val charOffset: Int)
 
     private val pageWidth = rawWidth.coerceIn(MIN_PAGE_WIDTH, MAX_WIDTH)
     private val pageHeight = rawHeight.coerceIn(MIN_PAGE_HEIGHT, MAX_HEIGHT)
@@ -84,9 +86,15 @@ class TextPageSource private constructor(
     private var pages: List<TextPage> = emptyList()
     // A text book is laid out one chapter at a time; pages before the loaded window do not exist.
     private data class ChapterSlice(val index: Int, val pages: List<TextPage>)
+    private data class ChapterEntry(val title: String, val paragraph: Int, val charOffset: Int)
     private val slices = ArrayList<ChapterSlice>()
     private var paragraphOffsets = IntArray(1)
-    private val chapterStarts: IntArray
+    /**
+     * The only chapter list used by the reader. It comes from the parsed document's own table of
+     * contents; `chapterStart` flags are only a fallback. Everything (TOC, jump, progress label,
+     * bookmark label, restore) indexes this same list, so the three views cannot disagree.
+     */
+    private val chapters: List<ChapterEntry>
     private val totalChars: Int
     private val layoutSize = PageSize(pageWidth, pageHeight)
 
@@ -100,16 +108,56 @@ class TextPageSource private constructor(
         offsets[doc.paragraphs.size] = cursor
         paragraphOffsets = offsets
         totalChars = cursor
-        val starts = doc.paragraphs.indices.filter { doc.paragraphs[it].chapterStart }
-            .ifEmpty { listOf(0) }
-            .toMutableList()
-        if (starts.first() != 0) starts.add(0, 0)
-        chapterStarts = starts.toIntArray()
+        chapters = buildChapters()
+    }
+
+    /** Uses the parsed document's own chapter table as the single source of truth. */
+    private fun buildChapters(): List<ChapterEntry> {
+        val last = doc.paragraphs.lastIndex
+        val entries = ArrayList<ChapterEntry>()
+        val declared = doc.chapters
+            .asSequence()
+            .filter { it.paragraphIndex in 0..last }
+            .sortedBy { it.paragraphIndex }
+            .distinctBy { it.paragraphIndex }
+            .toList()
+        if (declared.isNotEmpty()) {
+            declared.forEachIndexed { index, chapter ->
+                val paragraph = doc.paragraphs[chapter.paragraphIndex]
+                val title = chapter.title.trim().ifBlank {
+                    if (paragraph.title) paragraph.text else "第 ${index + 1} 章"
+                }
+                entries += ChapterEntry(title, chapter.paragraphIndex, paragraphOffsets[chapter.paragraphIndex])
+            }
+        }
+        // A parsed chapter list can be shorter than the body (for example a nav that skips a
+        // heading). Add any genuine chapter-start paragraph the document list missed, using the
+        // paragraph's own title, so a chapter never becomes unreachable.
+        val seenParagraphs = entries.mapTo(HashSet()) { it.paragraph }
+        doc.paragraphs.indices
+            .filter { doc.paragraphs[it].chapterStart && it !in seenParagraphs }
+            .forEach { paragraphIndex ->
+                val paragraph = doc.paragraphs[paragraphIndex]
+                val title = if (paragraph.title) paragraph.text else "第 ${entries.size + 1} 章"
+                entries += ChapterEntry(title, paragraphIndex, paragraphOffsets[paragraphIndex])
+            }
+        if (entries.isEmpty()) {
+            // No declared chapters and no chapter-start paragraphs: one readable body.
+            entries += ChapterEntry("正文", 0, 0)
+        } else {
+            entries.sortBy { it.paragraph }
+        }
+        // Keep the text before the first declared chapter reachable without pretending it is a chapter.
+        if (entries.first().paragraph > 0) entries.add(0, ChapterEntry("前言", 0, 0))
+        return entries
     }
 
     override val pageCount: Int get() = pages.size
     /** A text page is a few draw calls into a bitmap, so it can stay sharp during a swipe. */
     override val sharpWhileScrolling: Boolean get() = true
+    @Volatile
+    private var generation = 0
+    override val renderVersion: Int get() = generation
     override fun cachedPageSize(index: Int): PageSize? = if (index in 0 until pageCount) layoutSize else null
 
     override suspend fun pageSize(index: Int): PageSize {
@@ -141,12 +189,88 @@ class TextPageSource private constructor(
         return answer
     }
 
+    /**
+     * Character anchor of the first line visible at [scrollOffset] pixels inside [page].
+     * The anchor is always a line start, so it survives font, line-height and chapter changes.
+     */
+    fun charOffsetAtPageOffset(page: Int, scrollOffset: Int, viewportWidth: Int): Int {
+        if (pages.isEmpty()) return 0
+        val index = page.coerceIn(0, pages.lastIndex)
+        val text = pages[index]
+        // Before the first measure the caller has no viewport width yet; the page itself was
+        // paginated at the same width, so that is the correct fallback.
+        val width = if (viewportWidth > 0) viewportWidth else pageWidth
+        val scale = width.toDouble() / pageWidth
+        val sourceY = scrollOffset.coerceAtLeast(0).toDouble() / scale
+        var top = marginTop.toDouble()
+        var lastLineStart = text.startChar
+        for (segment in text.segments) {
+            val layout = layoutFor(segment.paragraph)
+            val pitch = lineMetrics(layout).second
+            val height = segment.lineCount * pitch
+            if (sourceY < top + height) {
+                val lineInSegment = ((sourceY - top).coerceAtLeast(0.0) / pitch)
+                    .toInt().coerceIn(0, segment.lineCount - 1)
+                val line = segment.startLine + lineInSegment
+                val lineStart = layout.getLineStart(line).coerceAtLeast(0)
+                return paragraphOffsets[segment.paragraph] + lineStart
+            }
+            top += height
+            val line = segment.startLine + segment.lineCount - 1
+            lastLineStart = paragraphOffsets[segment.paragraph] + layout.getLineStart(line)
+        }
+        // The viewport top is in the page's bottom margin: the next page's first line is on top.
+        return pages.getOrNull(index + 1)?.startChar ?: lastLineStart
+    }
+
+    /**
+     * Page and pixel offset that put the line containing [offset] at the viewport top. This is the
+     * inverse of [charOffsetAtPageOffset], computed from the current layout instead of saved pixels.
+     */
+    fun positionForCharOffset(offset: Int, viewportWidth: Int): TextPosition {
+        if (pages.isEmpty()) return TextPosition(0, 0, 0)
+        if (totalChars <= 0) return TextPosition(0, 0, 0)
+        val target = offset.coerceIn(0, totalChars - 1)
+        val page = pageForCharOffset(target.toLong())
+        val text = pages[page]
+        if (target <= text.startChar) return TextPosition(page, 0, text.startChar)
+        val scale = if (viewportWidth > 0) viewportWidth.toDouble() / pageWidth else 1.0
+        var top = marginTop.toDouble()
+        for (segment in text.segments) {
+            val layout = layoutFor(segment.paragraph)
+            val paragraphStart = paragraphOffsets[segment.paragraph]
+            val paragraphEnd = paragraphStart + layout.text.length
+            val pitch = lineMetrics(layout).second
+            if (target >= paragraphStart && target < paragraphEnd) {
+                val line = layout.getLineForOffset(target - paragraphStart)
+                    .coerceIn(0, layout.lineCount - 1)
+                val relative = line - segment.startLine
+                if (relative in 0 until segment.lineCount) {
+                    val lineStart = paragraphStart + layout.getLineStart(line)
+                    if (lineStart <= text.startChar) return TextPosition(page, 0, lineStart)
+                    val y = top + relative * pitch
+                    val scroll = ceil(y * scale).toInt().coerceAtLeast(0)
+                    return TextPosition(page, scroll, lineStart)
+                }
+            }
+            top += segment.lineCount * pitch
+        }
+        return TextPosition(page, 0, text.startChar)
+    }
+
+    /**
+     * The current-layout line start containing [offset], only when that offset is in this window.
+     * Bookmarks survive reflow by mapping their saved anchor through the current line layout.
+     */
+    fun lineAnchorInWindow(offset: Int): Int? {
+        if (pages.isEmpty()) return null
+        if (offset !in windowCharRange()) return null
+        return positionForCharOffset(offset, pageWidth).charOffset
+    }
+
     fun toc(): List<TocEntry> {
-        val lastParagraph = (doc.paragraphs.size - 1).coerceAtLeast(0)
-        val entries = doc.chapters.map { chapter ->
-            // A chapter may point past the last paragraph when a spine document yielded no text.
-            val start = paragraphOffsets[chapter.paragraphIndex.coerceIn(0, lastParagraph)]
-            TocEntry(chapter.title, pageForCharOffset(start.toLong()))
+        val entries = chapters.map { chapter ->
+            TocEntry(chapter.title, pageForCharOffset(chapter.charOffset.toLong()))
         }
         return entries.ifEmpty { listOf(TocEntry("正文", 0)) }
     }
@@ -156,8 +280,8 @@ class TextPageSource private constructor(
 
     /** Title of the chapter holding [page]; null when the book has no recognisable chapters. */
     fun chapterTitleOfPage(page: Int): String? {
-        val paragraph = pages.getOrNull(page)?.segments?.firstOrNull()?.paragraph ?: return null
-        return doc.chapters.lastOrNull { it.paragraphIndex <= paragraph }?.title
+        if (pages.isEmpty()) return null
+        return chapterTitle(chapterIndexForPage(page))
     }
 
     /** Reading progress of [page] across the whole book, 0..100; independent of page count. */
@@ -167,14 +291,24 @@ class TextPageSource private constructor(
     }
 
     /** Chapter title for a bookmark anchor, even when that chapter is not in the loaded window. */
-    fun chapterTitleForOffset(offset: Int): String? {
-        val paragraph = paragraphForOffset(offset)
-        return doc.chapters.lastOrNull { it.paragraphIndex <= paragraph }?.title
+    fun chapterTitleForOffset(offset: Int): String? =
+        chapters[chapterIndexForOffset(offset)].title
+
+    /** Exact percentage for the progress slider; the integer version is only for stored metadata. */
+    fun progressFractionOfPage(page: Int): Float {
+        if (totalChars <= 0) return 0f
+        return (charOffsetOfPage(page) * 100f / totalChars).coerceIn(0f, 100f)
     }
 
     fun progressPercentForOffset(offset: Int): Int {
         if (totalChars <= 0) return 0
         return ((offset.coerceIn(0, totalChars) * 100L) / totalChars).toInt().coerceIn(0, 100)
+    }
+
+    /** Exact percentage of a line anchor, for controls that must not round a chapter away. */
+    fun progressFractionForOffset(offset: Int): Float {
+        if (totalChars <= 0) return 0f
+        return (offset.coerceIn(0, totalChars) * 100f / totalChars).coerceIn(0f, 100f)
     }
 
     private fun paragraphForOffset(offset: Int): Int {
@@ -263,7 +397,7 @@ class TextPageSource private constructor(
         requireIndex(index)
         if (width <= 0) throw TextBookException("页面渲染宽度必须大于零。")
         val size = targetSize(width)
-        val key = RenderKey(index, size.width, size.height)
+        val key = RenderKey(index, size.width, size.height, generation)
         if (cache) bitmaps.get(key)?.let { return@withLock it }
         val bitmap = Bitmap.createBitmap(size.width, size.height, Bitmap.Config.ARGB_8888)
         try {
@@ -283,7 +417,7 @@ class TextPageSource private constructor(
     override fun cachedRender(index: Int, width: Int): Bitmap? {
         if (width <= 0 || index !in 0 until pageCount) return null
         val size = targetSize(width)
-        return bitmaps.get(RenderKey(index, size.width, size.height))
+        return bitmaps.get(RenderKey(index, size.width, size.height, generation))
     }
 
     override suspend fun renderTile(
@@ -402,54 +536,58 @@ class TextPageSource private constructor(
     }
 
     /** Loads the chapter holding [offset] and nothing else: this is the book's first visible page. */
-    suspend fun loadInitial(offset: Int) {
-        val chapter = chapterForOffset(offset)
-        slices.clear()
-        slices += ChapterSlice(chapter, paginateChapter(chapter))
-        rebuildPages()
+    suspend fun loadInitial(offset: Int): Unit = withContext(Dispatchers.Default) {
+        layoutMutex.withLock {
+            val chapter = chapterForOffset(offset)
+            slices.clear()
+            slices += ChapterSlice(chapter, paginateChapter(chapter))
+            generation++
+            bitmaps.evictAll()
+            rebuildPages()
+        }
     }
 
     /** Appends the next chapter; returns how many pages were added, or zero at the book end. */
-    suspend fun loadNextChapter(): Int {
-        val next = (slices.lastOrNull()?.index ?: -1) + 1
-        if (next >= chapterStarts.size) return 0
-        val pages = paginateChapter(next)
-        slices += ChapterSlice(next, pages)
-        rebuildPages()
-        return pages.size
+    suspend fun loadNextChapter(): Int = withContext(Dispatchers.Default) {
+        layoutMutex.withLock {
+            val next = (slices.lastOrNull()?.index ?: -1) + 1
+            if (next >= chapters.size) return@withLock 0
+            val pages = paginateChapter(next)
+            slices += ChapterSlice(next, pages)
+            rebuildPages()
+            pages.size
+        }
     }
 
     /** Prepends the previous chapter; returns how many pages shifted the existing page indices. */
-    suspend fun loadPreviousChapter(): Int {
-        val previous = (slices.firstOrNull()?.index ?: 0) - 1
-        if (previous < 0) return 0
-        val pages = paginateChapter(previous)
-        slices.add(0, ChapterSlice(previous, pages))
-        rebuildPages()
-        return pages.size
+    suspend fun loadPreviousChapter(): Int = withContext(Dispatchers.Default) {
+        layoutMutex.withLock {
+            val previous = (slices.firstOrNull()?.index ?: 0) - 1
+            if (previous < 0) return@withLock 0
+            val pages = paginateChapter(previous)
+            slices.add(0, ChapterSlice(previous, pages))
+            // Prepending shifts every existing page index; bitmaps keyed by the old indices would
+            // otherwise draw the neighbouring chapter over the page the reader is looking at.
+            generation++
+            bitmaps.evictAll()
+            rebuildPages()
+            pages.size
+        }
     }
 
     fun hasNextChapter(): Boolean =
-        (slices.lastOrNull()?.index ?: -1) + 1 < chapterStarts.size
+        (slices.lastOrNull()?.index ?: -1) + 1 < chapters.size
 
     fun hasPreviousChapter(): Boolean = (slices.firstOrNull()?.index ?: 0) > 0
 
-    fun chapterCount(): Int = chapterStarts.size
+    fun chapterCount(): Int = chapters.size
 
-    fun chapterTitle(index: Int): String =
-        doc.chapters.lastOrNull { it.paragraphIndex <= chapterStarts[index] }?.title ?: "正文"
+    fun chapterTitle(index: Int): String = chapters[index.coerceIn(0, chapters.lastIndex)].title
 
-    fun chapterStartOffset(index: Int): Int = paragraphOffsets[chapterStarts[index]]
+    fun chapterStartOffset(index: Int): Int = chapters[index.coerceIn(0, chapters.lastIndex)].charOffset
 
-    fun chapterIndexForPage(page: Int): Int {
-        var start = 0
-        for (slice in slices) {
-            val end = start + slice.pages.size
-            if (page < end) return slice.index
-            start = end
-        }
-        return slices.lastOrNull()?.index ?: 0
-    }
+    fun chapterIndexForPage(page: Int): Int =
+        if (pages.isEmpty()) 0 else chapterIndexForOffset(charOffsetOfPage(page).toInt())
 
     /** Loads the chapter holding [offset] (if needed) and returns its page in the current window. */
     suspend fun jumpToOffset(offset: Int): Int {
@@ -463,7 +601,7 @@ class TextPageSource private constructor(
 
     /** Loads a chapter by index and returns its first page in the current window. */
     suspend fun jumpToChapter(index: Int): Int {
-        val chapter = index.coerceIn(0, chapterStarts.size - 1)
+        val chapter = index.coerceIn(0, chapters.size - 1)
         if (slices.any { it.index == chapter }) {
             var page = 0
             for (slice in slices) {
@@ -477,7 +615,7 @@ class TextPageSource private constructor(
 
     private fun windowCharRange(): IntRange {
         val last = slices.lastOrNull() ?: return IntRange.EMPTY
-        val end = paragraphOffsets[chapterEndParagraph(last.index)]
+        val end = chapters.getOrNull(last.index + 1)?.charOffset ?: totalChars
         return (pages.firstOrNull()?.startChar ?: 0) until end
     }
 
@@ -486,18 +624,21 @@ class TextPageSource private constructor(
     }
 
     private suspend fun paginateChapter(index: Int): List<TextPage> =
-        paginateRange(chapterStarts[index], chapterEndParagraph(index), paragraphOffsets)
+        paginateRange(chapters[index].paragraph, chapterEndParagraph(index), paragraphOffsets)
 
     private fun chapterEndParagraph(index: Int): Int =
-        if (index + 1 < chapterStarts.size) chapterStarts[index + 1] else doc.paragraphs.size
+        chapters.getOrNull(index + 1)?.paragraph ?: doc.paragraphs.size
 
-    private fun chapterForOffset(offset: Int): Int {
+    private fun chapterForOffset(offset: Int): Int = chapterIndexForOffset(offset)
+
+    private fun chapterIndexForOffset(offset: Int): Int {
+        val target = offset.coerceIn(0, (totalChars - 1).coerceAtLeast(0))
         var low = 0
-        var high = chapterStarts.lastIndex
+        var high = chapters.lastIndex
         var answer = 0
         while (low <= high) {
             val mid = (low + high) ushr 1
-            if (paragraphOffsets[chapterStarts[mid]] <= offset) {
+            if (chapters[mid].charOffset <= target) {
                 answer = mid
                 low = mid + 1
             } else {
@@ -605,7 +746,7 @@ class TextPageSource private constructor(
         }
     }
 
-    private data class RenderKey(val index: Int, val width: Int, val height: Int)
+    private data class RenderKey(val index: Int, val width: Int, val height: Int, val version: Int)
 
     /** The parsed book. Laying it out again for new typesetting must not re-read the file. */
     val document: TextDocument get() = doc

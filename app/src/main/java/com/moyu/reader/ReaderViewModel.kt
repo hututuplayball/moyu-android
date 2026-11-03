@@ -238,8 +238,19 @@ class ReaderViewModel(application: Application, private val savedState: SavedSta
         val book = activeBook.value ?: return
         val nextOffset = offset.coerceAtLeast(0)
         val nextProgress = progress.coerceIn(0, 100)
-        if (book.textOffset == nextOffset && book.textProgress == nextProgress) return
-        val next = book.copy(textOffset = nextOffset, textProgress = nextProgress)
+        // Text progress is a single line anchor now. The page pixel is derived from that anchor
+        // when the book reopens, so stale text page offsets are cleared instead of trusted.
+        val nextPageOffset = if (book.format == FORMAT_TEXT || book.format == FORMAT_EPUB) {
+            0
+        } else book.pageOffset
+        if (book.textOffset == nextOffset && book.textProgress == nextProgress &&
+            book.pageOffset == nextPageOffset
+        ) return
+        val next = book.copy(
+            textOffset = nextOffset,
+            textProgress = nextProgress,
+            pageOffset = nextPageOffset,
+        )
         activeBook.value = next
         schedulePersist(next)
     }
@@ -308,7 +319,11 @@ class ReaderViewModel(application: Application, private val savedState: SavedSta
                 } else {
                     library.toggleBookmark(book.id, page)
                 }
-            } catch (_: IOException) { notices.emit("书签未能保存，请检查设备存储空间") }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                notices.emit(error.message ?: "书签未能保存，请检查设备存储空间")
+            }
         }
     }
 

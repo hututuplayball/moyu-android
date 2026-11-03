@@ -27,6 +27,13 @@ interface PageSource {
      * PDF pages and comic scans keep the half-scale motion preview; flowing text does not need it.
      */
     val sharpWhileScrolling: Boolean get() = false
+
+    /**
+     * Changes whenever pages are replaced in the same source instance. UI state that caches a
+     * rendered page must include this key, otherwise a chapter jump can keep showing the previous
+     * chapter's bitmap while the page list, progress and table of contents already moved on.
+     */
+    val renderVersion: Int get() = 0
 }
 
 /** Current page plus three on each side: enough to hide two page turns in either direction. */

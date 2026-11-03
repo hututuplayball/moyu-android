@@ -128,20 +128,23 @@ fun PdfPage(
         // This key never follows a pinch frame. Page sources also cap pathological long-page base bitmaps.
         val renderWidth = pageRenderWidth(page, baseViewport, fit)
         val displaySize = pageDisplaySize(page, constraints.maxWidth, constraints.maxHeight, fit)
+        // Text chapter windows mutate their page list in place; this key drops every bitmap
+        // captured from the previous window before it can be shown over the new pages.
+        val renderVersion = session.renderVersion
         // A page prefetched at the exact viewport width is published before the spinner ever shows.
-        var render by remember(session, index, renderWidth, retry, keep, pageBackground) {
+        var render by remember(session, index, renderWidth, retry, keep, pageBackground, renderVersion) {
             mutableStateOf(
                 if (keep) session.cachedRender(index, renderWidth)?.let { PageRender(it) } else null,
             )
         }
         // A fast fling would upload a full-page texture for every page it passes. A half-scale
         // preview is readable while still costing a quarter of that memory.
-        var preview by remember(session, index, pageBackground) { mutableStateOf<Bitmap?>(null) }
+        var preview by remember(session, index, pageBackground, renderVersion) { mutableStateOf<Bitmap?>(null) }
         val previewWidth = (renderWidth / 2).coerceAtLeast(180)
         // Flowing text draws cheaply, so it never needs the half-scale motion preview that
         // elsewhere keeps a fast fling from uploading a full-page texture for every page.
         val sharp = session.sharpWhileScrolling
-        LaunchedEffect(session, index, renderWidth, retry, size, displaySize == null, keep, scrolling, visible, defer, pageBackground) {
+        LaunchedEffect(session, index, renderWidth, retry, size, displaySize == null, keep, scrolling, visible, defer, pageBackground, renderVersion) {
             if (!keep) {
                 // LazyColumn can hold a page just outside the viewport; do not let that keep a full bitmap alive.
                 render = null
@@ -188,8 +191,8 @@ fun PdfPage(
         ) else null
         // Only a currently composed page's visible rectangle owns a tile, with no accumulating tile cache.
         val tilePageSize = IntSize(pageBounds.width.roundToInt(), pageBounds.height.roundToInt())
-        var tile by remember(session, index, request, tilePageSize, retry, pageBackground) { mutableStateOf<TileFrame?>(null) }
-        LaunchedEffect(session, index, request, tilePageSize, retry, pageBackground) {
+        var tile by remember(session, index, request, tilePageSize, retry, pageBackground, renderVersion) { mutableStateOf<TileFrame?>(null) }
+        LaunchedEffect(session, index, request, tilePageSize, retry, pageBackground, renderVersion) {
             if (request == null) {
                 // Zoom ended or the page left the window; a tile is only useful at its current viewport.
                 tile = null

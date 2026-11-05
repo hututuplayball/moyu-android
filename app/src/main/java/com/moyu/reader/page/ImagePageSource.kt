@@ -470,6 +470,54 @@ class ImagePageSource private constructor(
             }
         }
 
+        /**
+         * Opens the archive with a caller-supplied page order instead of sorting every image inside
+         * it: an EPUB's spine says which picture is page one, and a plain name sort would not.
+         */
+        suspend fun open(file: File, pagePaths: List<String>): ImagePageSource = withContext(Dispatchers.IO) {
+            currentCoroutineContext().ensureActive()
+            var zip: ZipFile? = null
+            try {
+                val opened = openZip(file)
+                zip = opened
+                createZipSource(opened, pagePaths)
+            } catch (error: Throwable) {
+                try {
+                    zip?.close()
+                } catch (_: IOException) {
+                    // Preserve the original failure.
+                }
+                throw mapOpenError(error)
+            }
+        }
+
+        /** Takes ownership of [descriptor], like the archive overload above. */
+        suspend fun open(descriptor: ParcelFileDescriptor, pagePaths: List<String>): ImagePageSource =
+            withContext(Dispatchers.IO) {
+                currentCoroutineContext().ensureActive()
+                var zip: ZipFile? = null
+                try {
+                    val opened = openZip(File("/proc/self/fd/${descriptor.fd}"))
+                    zip = opened
+                    createZipSource(opened, pagePaths) {
+                        opened.close()
+                        descriptor.close()
+                    }
+                } catch (error: Throwable) {
+                    try {
+                        zip?.close()
+                    } catch (_: IOException) {
+                        // Preserve the original failure.
+                    }
+                    try {
+                        descriptor.close()
+                    } catch (_: IOException) {
+                        // Same.
+                    }
+                    throw mapOpenError(error)
+                }
+            }
+
         suspend fun openFolder(resolver: ContentResolver, treeUri: Uri): ImagePageSource =
             withContext(Dispatchers.IO) {
                 currentCoroutineContext().ensureActive()
@@ -514,6 +562,33 @@ class ImagePageSource private constructor(
             }
             entries.sortWith { first, second -> COMIC_PATH_ORDER.compare(first.name, second.name) }
             if (entries.isEmpty()) throw PageSourceException("这个压缩包里没有图片，漫画需要 JPG、PNG、WebP 等图片文件。")
+            return imageSource(zip, entries, release)
+        }
+
+        /** Keeps the caller's order; the page list is already resolved to exact archive entries. */
+        private fun createZipSource(
+            zip: ZipFile,
+            pagePaths: List<String>,
+            release: (() -> Unit)? = null,
+        ): ImagePageSource {
+            val entries = ArrayList<ComicPage>(pagePaths.size)
+            pagePaths.forEach { path ->
+                val entry = zip.getEntry(path) ?: return@forEach
+                if (entry.isDirectory) return@forEach
+                if (entries.size >= MAX_ZIP_PAGES) {
+                    throw PageSourceException("图片数量超过 $MAX_ZIP_PAGES 张，暂不支持。")
+                }
+                entries += ComicPage(path, entry, null)
+            }
+            if (entries.isEmpty()) throw PageSourceException("这个 EPUB 里没有可显示的图片页面。")
+            return imageSource(zip, entries, release)
+        }
+
+        private fun imageSource(
+            zip: ZipFile,
+            entries: List<ComicPage>,
+            release: (() -> Unit)?,
+        ): ImagePageSource {
             val close = release ?: { zip.close() }
             return ImagePageSource(entries, { page ->
                 val entry = page.entry ?: throw PageSourceException("图片「${page.name}」暂时不可用。")
@@ -522,8 +597,24 @@ class ImagePageSource private constructor(
         }
 
         private fun openZip(file: File): ZipFile {
-            val primary = openZipWith(file, null)
-            if (!hasBrokenNames(primary)) return primary
+            val primary = try {
+                openZipWith(file, null)
+            } catch (first: PageSourceException) {
+                // Some runtimes reject a GBK-named central directory while constructing the file.
+                return try {
+                    openZipWith(file, GBK)
+                } catch (_: PageSourceException) {
+                    throw first
+                }
+            }
+            // Android validates entry names lazily: iterating a GBK-named archive throws
+            // IllegalArgumentException (MALFORMED) instead of yielding replacement characters.
+            val broken = try {
+                hasBrokenNames(primary)
+            } catch (_: IllegalArgumentException) {
+                true
+            }
+            if (!broken) return primary
             try {
                 primary.close()
             } catch (_: IOException) {

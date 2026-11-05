@@ -95,6 +95,7 @@ class MainActivity : ComponentActivity() {
             val groups by vm.groups.collectAsStateWithLifecycle()
             val preferences by vm.preferences.collectAsStateWithLifecycle()
             val brightness by vm.brightness.collectAsStateWithLifecycle()
+            val speech by vm.speech.collectAsStateWithLifecycle()
             val book by vm.reading.collectAsStateWithLifecycle()
             val screen by vm.screen.collectAsStateWithLifecycle()
             val libraryKind by vm.libraryKind.collectAsStateWithLifecycle()
@@ -147,7 +148,9 @@ class MainActivity : ComponentActivity() {
                                     vm::backToLibrary, vm::updatePosition, vm::toggleBookmark, vm::setBrightness,
                                     vm::setRightToLeft, onTextReading = vm::setTextReading,
                                     onTextPosition = vm::updateTextPosition, onView = vm::setReadView,
-                                    onRelinked = { vm.clearUnavailable(selected.id) })
+                                    onRelinked = { vm.clearUnavailable(selected.id) },
+                                    speechPreferences = speech, onSpeech = vm::setSpeech,
+                                    onSpeechBackground = vm::setSpeechBackground)
                             }
                             "settings" -> SettingsScreen(
                                 preferences = preferences,
@@ -171,6 +174,8 @@ class MainActivity : ComponentActivity() {
                                         "application/x-zip-compressed",
                                         "application/vnd.comicbook+zip",
                                         "application/x-cbz",
+                                        // A comic can also arrive as a fixed-layout EPUB.
+                                        "application/epub+zip",
                                         "application/octet-stream",
                                     ))
                                 },

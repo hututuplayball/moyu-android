@@ -42,8 +42,14 @@ data class BookEntity(
     /** True when this PDF can also be read as flowing text. */
     val hasTextView: Boolean get() = format == FORMAT_PDF && textState == TEXT_READY
 
+    /**
+     * True when this book is laid out as flowing text. An EPUB bought as a comic is a fixed-layout
+     * package of image pages, so it keeps the page reader even though the file is still an EPUB.
+     */
+    val isTextBook: Boolean get() = format == FORMAT_TEXT || (format == FORMAT_EPUB && kind == KIND_EBOOK)
+
     /** True when the shelf should label this book with its flowing-text pages, not the PDF's own. */
-    val showsTextPages: Boolean get() = hasTextView && readView == READ_VIEW_TEXT && textPageCount > 0
+    val showsTextPages: Boolean get() = PDF_TEXT_VIEW_AVAILABLE && hasTextView && readView == READ_VIEW_TEXT && textPageCount > 0
 
     /** The page count to label this book with: whatever layout it was last read in. */
     val labeledPageCount: Int get() = if (showsTextPages) textPageCount else pageCount
@@ -58,6 +64,13 @@ data class BookEntity(
 
 const val READ_VIEW_PDF = 0
 const val READ_VIEW_TEXT = 1
+
+/**
+ * The PDF text view is hidden: its flowing layout reads poorly on illustrated PDFs and it costs a
+ * whole-book text extraction the first time a PDF is opened. The code stays in place, and flipping
+ * this back on restores the view switch, the shelf labels and the extraction probe together.
+ */
+const val PDF_TEXT_VIEW_AVAILABLE = false
 
 const val STORAGE_COPY = 0
 const val STORAGE_REFERENCE = 1

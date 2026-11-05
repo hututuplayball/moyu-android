@@ -1,4 +1,4 @@
-package com.moyu.reader
+﻿package com.moyu.reader
 
 import com.moyu.reader.book.TextChapter
 import com.moyu.reader.book.TextDocument
@@ -30,34 +30,45 @@ class TextLayoutCacheAdoptionTest {
             TextParagraph("第二章 夜路", title = true, chapterStart = true),
             TextParagraph(body),
             TextParagraph(body),
+            TextParagraph("第三章 晨光", title = true, chapterStart = true),
+            TextParagraph(body),
+            TextParagraph(body),
         ),
-        listOf(TextChapter("第一章 山风", 0), TextChapter("第二章 夜路", 3)),
+        listOf(TextChapter("第一章 山风", 0), TextChapter("第二章 夜路", 3), TextChapter("第三章 晨光", 6)),
     )
 
     private val secondChapterOffset = document.paragraphs.take(3).sumOf { it.text.length }
+    private val thirdChapterOffset = document.paragraphs.take(6).sumOf { it.text.length }
 
-    @Test fun openingAnchorsOnlyTheChapterAroundTheReadingSpot() = runBlocking {
+    @Test fun openingAlsoLoadsTheChapterBehindTheReadingSpot() = runBlocking {
         val source = TextPageSource.reflow(
-            document, TextReadingSettings(), page, density, startOffset = secondChapterOffset,
+            document, TextReadingSettings(), page, density, startOffset = thirdChapterOffset,
         )
         assertTrue(source.pageCount > 0)
+        // One chapter behind the spot is laid out too: a backward fling must not run out of
+        // content at its first page.
         assertEquals("第二章 夜路", source.chapterTitleOfPage(0))
-        // The first chapter exists before this window, but was not measured to open it.
+        assertEquals(secondChapterOffset, source.charOffsetOfPage(0).toInt())
+        val readingPage = source.pageForCharOffset(thirdChapterOffset.toLong())
+        assertEquals("第三章 晨光", source.chapterTitleOfPage(readingPage))
+        assertEquals(thirdChapterOffset, source.charOffsetOfPage(readingPage).toInt())
         assertTrue(source.hasPreviousChapter())
         assertFalse(source.hasNextChapter())
-        assertEquals(secondChapterOffset, source.charOffsetOfPage(0).toInt())
     }
 
     @Test fun loadingPreviousChapterPrependsItsPages() = runBlocking {
         val source = TextPageSource.reflow(
-            document, TextReadingSettings(), page, density, startOffset = secondChapterOffset,
+            document, TextReadingSettings(), page, density, startOffset = thirdChapterOffset,
         )
+        val before = source.pageCount
         val added = source.loadPreviousChapter()
         assertTrue(added > 0)
         assertEquals("第一章 山风", source.chapterTitleOfPage(0))
         assertEquals(0, source.charOffsetOfPage(0).toInt())
+        assertEquals(before + added, source.pageCount)
         // Existing pages shifted by exactly the number the previous chapter contributed.
-        assertEquals(secondChapterOffset, source.charOffsetOfPage(added).toInt())
+        val readingPage = source.pageForCharOffset(thirdChapterOffset.toLong())
+        assertEquals(thirdChapterOffset, source.charOffsetOfPage(readingPage).toInt())
     }
 
     @Test fun loadingNextChapterAppendsItsPages() = runBlocking {
@@ -67,6 +78,12 @@ class TextLayoutCacheAdoptionTest {
         assertTrue(added > 0)
         assertEquals(before + added, source.pageCount)
         assertEquals("第二章 夜路", source.chapterTitleOfPage(before))
+        // A third chapter follows, so the window can keep growing past the second.
+        assertTrue(source.hasNextChapter())
+        val addedAgain = source.loadNextChapter()
+        assertTrue(addedAgain > 0)
+        assertEquals(before + added + addedAgain, source.pageCount)
+        assertEquals("第三章 晨光", source.chapterTitleOfPage(before + added))
         assertFalse(source.hasNextChapter())
     }
 }

@@ -100,6 +100,11 @@ object EpubPackageReader {
                 blocks.drop(1).forEach { paragraphs += TextParagraph(it) }
             }
         }
+        if (paragraphs.isEmpty()) {
+            // Fixed-layout comic EPUBs are spine pages of images only. Importing one as an e-book
+            // would produce a single placeholder page, so say what it is instead.
+            throw TextBookException("这本 EPUB 只有图片、没有可读的文字，像是漫画，请到「漫画」书架导入。")
+        }
         return TextDocument.of(paragraphs, chapters)
     }
 

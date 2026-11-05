@@ -7,8 +7,6 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import com.moyu.reader.data.BookEntity
 import com.moyu.reader.data.BackupRepository
-import com.moyu.reader.data.FORMAT_EPUB
-import com.moyu.reader.data.FORMAT_TEXT
 import com.moyu.reader.data.KIND_COMIC
 import com.moyu.reader.data.KIND_EBOOK
 import com.moyu.reader.data.LibraryRepository
@@ -17,6 +15,7 @@ import com.moyu.reader.data.READER_BRIGHTNESS_FOLLOW_SYSTEM
 import com.moyu.reader.data.READ_VIEW_PDF
 import com.moyu.reader.data.READ_VIEW_TEXT
 import com.moyu.reader.data.ReaderPreferences
+import com.moyu.reader.data.SpeechPreferences
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -45,6 +44,7 @@ class ReaderViewModel(application: Application, private val savedState: SavedSta
     val groups = library.groups.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val preferences = settings.preferences.stateIn(viewModelScope, SharingStarted.Eagerly, ReaderPreferences())
     val brightness = settings.readerBrightness.stateIn(viewModelScope, SharingStarted.Eagerly, READER_BRIGHTNESS_FOLLOW_SYSTEM)
+    val speech = settings.speechPreferences.stateIn(viewModelScope, SharingStarted.Eagerly, SpeechPreferences())
     private val activeBook = MutableStateFlow<BookEntity?>(null)
     val reading = activeBook.asStateFlow()
     private val importState = MutableStateFlow(false)
@@ -189,6 +189,7 @@ class ReaderViewModel(application: Application, private val savedState: SavedSta
             var imported = 0
             var remembered = 0
             var existing = 0
+            val hints = mutableListOf<String>()
             val label = if (kind == KIND_EBOOK) "电子书" else "漫画"
             // A repeat or repair returns the stored row with its original timestamp, so its age
             // tells whether this pass actually added a book to the shelf.
@@ -196,12 +197,14 @@ class ReaderViewModel(application: Application, private val savedState: SavedSta
             try {
                 for (uri in uris) {
                     try {
-                        val book = library.importFile(uri, kind)
+                        val outcome = library.importFile(uri, kind)
+                        val book = outcome.book
                         when {
                             book.kind != kind -> existing++
                             book.importedAt >= startedAt -> imported++
                             else -> remembered++
                         }
+                        outcome.notice?.let(hints::add)
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (error: Exception) {
@@ -213,7 +216,13 @@ class ReaderViewModel(application: Application, private val savedState: SavedSta
                     if (remembered > 0) add("$remembered 本已在${label}书架中")
                     if (existing > 0) add("$existing 本已在其他书架中")
                 }
-                if (parts.isNotEmpty()) notices.emit(parts.joinToString("，"))
+                // One snackbar, not two: a queued second message looked like a late, unrelated
+                // warning. The shelf-mismatch hint belongs with the import result.
+                val messages = buildList {
+                    if (parts.isNotEmpty()) add(parts.joinToString("，"))
+                    addAll(hints.distinct())
+                }
+                if (messages.isNotEmpty()) notices.emit(messages.joinToString("；"))
             } finally {
                 importState.value = false
             }
@@ -240,7 +249,7 @@ class ReaderViewModel(application: Application, private val savedState: SavedSta
         val nextProgress = progress.coerceIn(0, 100)
         // Text progress is a single line anchor now. The page pixel is derived from that anchor
         // when the book reopens, so stale text page offsets are cleared instead of trusted.
-        val nextPageOffset = if (book.format == FORMAT_TEXT || book.format == FORMAT_EPUB) {
+        val nextPageOffset = if (book.isTextBook) {
             0
         } else book.pageOffset
         if (book.textOffset == nextOffset && book.textProgress == nextProgress &&
@@ -314,7 +323,7 @@ class ReaderViewModel(application: Application, private val savedState: SavedSta
         val book = activeBook.value ?: return
         viewModelScope.launch {
             try {
-                if (book.format == FORMAT_TEXT || book.format == FORMAT_EPUB) {
+                if (book.isTextBook) {
                     library.toggleTextBookmark(book.id, page)
                 } else {
                     library.toggleBookmark(book.id, page)
@@ -392,6 +401,12 @@ class ReaderViewModel(application: Application, private val savedState: SavedSta
     fun setPrefetchRadius(value: Int) { changeSetting { settings.setPrefetchRadius(value) } }
     fun setTextReading(fontSize: Int? = null, lineSpacing: String? = null, themeId: String? = null) {
         changeSetting { settings.setTextReading(fontSize, lineSpacing, themeId) }
+    }
+    fun setSpeech(engine: String?, voice: String?, rate: Float) {
+        changeSetting { settings.setSpeech(engine, voice, rate) }
+    }
+    fun setSpeechBackground(enabled: Boolean) {
+        changeSetting { settings.setSpeechBackground(enabled) }
     }
 
     private companion object {

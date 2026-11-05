@@ -50,6 +50,18 @@ const val DEFAULT_CUSTOM_PREFETCH_RADIUS = 4
 /** Reading-only brightness; -1 keeps the system level. Never leaves the device or the backup file. */
 const val READER_BRIGHTNESS_FOLLOW_SYSTEM = -1f
 
+/**
+ * How the machine reads the book out loud. The engine and the voice belong to the device, so this
+ * stays local: a phone with a different set of speech engines has nothing to do with them.
+ */
+data class SpeechPreferences(
+    val engine: String? = null,
+    val voice: String? = null,
+    val rate: Float = 1f,
+    /** Keep reading with the screen off or the app in the background. */
+    val background: Boolean = false,
+)
+
 internal data class PreferenceMetadata(val value: ReaderPreferences, val updatedAt: Long)
 internal data class BackupConfiguration(val enabled: Boolean = true, val lastBackupAt: Long = 0, val pendingRestore: Boolean = false)
 
@@ -86,6 +98,21 @@ class PreferencesRepository internal constructor(private val store: DataStore<Pr
 
     val readerBrightness: Flow<Float> = store.data
         .map { it[READER_BRIGHTNESS] ?: READER_BRIGHTNESS_FOLLOW_SYSTEM }
+        .distinctUntilChanged()
+
+    /** The speech engine, voice and speed the reader picked. Device-local, like the brightness. */
+    val speechPreferences: Flow<SpeechPreferences> = store.data
+        .map { prefs ->
+            SpeechPreferences(
+                engine = prefs[SPEECH_ENGINE],
+                voice = prefs[SPEECH_VOICE],
+                rate = prefs[SPEECH_RATE] ?: 1f,
+                background = prefs[SPEECH_BACKGROUND] ?: false,
+            )
+        }
+        .catch { error ->
+            if (error is IOException) emit(SpeechPreferences()) else throw error
+        }
         .distinctUntilChanged()
 
     internal val backupConfiguration: Flow<BackupConfiguration> = store.data.map {
@@ -151,6 +178,21 @@ class PreferencesRepository internal constructor(private val store: DataStore<Pr
             }
             changed
         }
+    }
+
+    /** Saves the speech engine, voice and speed. Device-local: it never touches the backup timestamp. */
+    suspend fun setSpeech(engine: String?, voice: String?, rate: Float) {
+        require(rate in 0.5f..2f) { "语速无效。" }
+        store.edit {
+            if (engine == null) it.remove(SPEECH_ENGINE) else it[SPEECH_ENGINE] = engine
+            if (voice == null) it.remove(SPEECH_VOICE) else it[SPEECH_VOICE] = voice
+            it[SPEECH_RATE] = rate
+        }
+    }
+
+    /** Enables reading with the screen off; the reader starts a foreground service for it. */
+    suspend fun setSpeechBackground(enabled: Boolean) {
+        store.edit { it[SPEECH_BACKGROUND] = enabled }
     }
 
     suspend fun setLastReadingBook(id: String?) {
@@ -219,6 +261,10 @@ class PreferencesRepository internal constructor(private val store: DataStore<Pr
         val TEXT_FONT_SIZE = intPreferencesKey("text_font_size")
         val TEXT_LINE_SPACING = stringPreferencesKey("text_line_spacing")
         val TEXT_THEME = stringPreferencesKey("text_theme")
+        val SPEECH_ENGINE = stringPreferencesKey("speech_engine")
+        val SPEECH_VOICE = stringPreferencesKey("speech_voice")
+        val SPEECH_RATE = floatPreferencesKey("speech_rate")
+        val SPEECH_BACKGROUND = booleanPreferencesKey("speech_background")
         val UPDATED_AT = longPreferencesKey("reader_metadata_updated_at")
         val BACKUP_ENABLED = booleanPreferencesKey("backup_enabled")
         val LAST_BACKUP = longPreferencesKey("last_metadata_backup_at")

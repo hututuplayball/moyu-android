@@ -20,6 +20,8 @@ signing.properties
 # ==== 打包产物 ====
 *.apk
 *.aab
+# apksigner 的签名副本，跟 APK 一样属于本地产物
+*.idsig
 output.json
 
 # ==== IDE / 系统 ====

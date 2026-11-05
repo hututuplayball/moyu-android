@@ -149,6 +149,7 @@ import com.moyu.reader.data.GroupEntity
 import com.moyu.reader.data.KIND_COMIC
 import com.moyu.reader.data.KIND_EBOOK
 import com.moyu.reader.data.READ_VIEW_TEXT
+import com.moyu.reader.data.PDF_TEXT_VIEW_AVAILABLE
 import java.io.File
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
@@ -762,7 +763,7 @@ fun LibraryScreen(
                         }
                         val pageContinuing = remember(pageBooks) {
                             pageBooks.sortedByDescending { it.updatedAt }
-                                .firstOrNull { it.hasStarted() && !it.isFinished() }
+                                .firstOrNull { it.hasStarted() }
                         }
                         val pageSearchResults = remember(pageSortedBooks, query) {
                             val term = query.trim()
@@ -1195,16 +1196,18 @@ private fun HeaderAction(
 
 @Composable
 private fun ContinueReadingCard(book: BookEntity, kind: Int, onOpen: () -> Unit) {
+    // A finished book stays here instead of vanishing: the shelf is where the reader last was.
+    val label = if (book.isFinished()) "已读完" else "正在阅读"
     Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.primary) {
         Row(
             Modifier.testTag("continue-reading").fillMaxWidth().clickable(
                 role = Role.Button, onClickLabel = "继续阅读${book.title}", onClick = onOpen,
-            ).padding(16.dp).semantics { contentDescription = "正在阅读 ${book.title}，第 ${book.labeledPage} 页，共 ${book.labeledPageCount} 页" },
+            ).padding(16.dp).semantics { contentDescription = "$label ${book.title}，第 ${book.labeledPage} 页，共 ${book.labeledPageCount} 页" },
             horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically,
         ) {
             PdfCover(book, Modifier.width(52.dp).aspectRatio(0.72f))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                Text("正在阅读", style = MaterialTheme.typography.labelSmall,
+                Text(label, style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.72f))
                 Text(book.title, style = MaterialTheme.typography.titleMedium, maxLines = 1,
                     overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onPrimary)
@@ -1658,8 +1661,8 @@ private fun BookEntity.isFinished(): Boolean =
     else hasStarted() && labeledPageCount > 0 && labeledPage == labeledPageCount
 
 private fun BookEntity.isTextLayout(): Boolean =
-    format == FORMAT_TEXT || format == FORMAT_EPUB ||
-        (format == FORMAT_PDF && hasTextView && readView == READ_VIEW_TEXT)
+    isTextBook ||
+        (format == FORMAT_PDF && PDF_TEXT_VIEW_AVAILABLE && hasTextView && readView == READ_VIEW_TEXT)
 
 private fun BookEntity.formatLabel(): String = when (format) {
     FORMAT_ARCHIVE -> "CBZ"

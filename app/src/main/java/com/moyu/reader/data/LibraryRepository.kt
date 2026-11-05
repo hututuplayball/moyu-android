@@ -11,6 +11,7 @@ import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.util.LruCache
+import com.moyu.reader.book.EpubComic
 import com.moyu.reader.book.EpubCover
 import com.moyu.reader.book.EpubSniffer
 import com.moyu.reader.book.PdfTextBook
@@ -60,6 +61,12 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 class LibraryException(message: String) : IOException(message)
+
+/**
+ * A finished import plus an optional note for the reader. The book always stays on the shelf it was
+ * imported into; [notice] only says the file looks like it belongs on the other shelf.
+ */
+data class ImportOutcome(val book: BookEntity, val notice: String? = null)
 
 class LibraryRepository(context: Context) {
     private val appContext = context.applicationContext
@@ -115,7 +122,7 @@ class LibraryRepository(context: Context) {
             throw error
         }
 
-    suspend fun importFile(uri: Uri, kind: Int = KIND_COMIC): BookEntity = withContext(Dispatchers.IO) {
+    suspend fun importFile(uri: Uri, kind: Int = KIND_COMIC): ImportOutcome = withContext(Dispatchers.IO) {
         fileMutex.withLock {
             try {
                 importLocked(uri, kind)
@@ -354,7 +361,9 @@ class LibraryRepository(context: Context) {
             return@withContext ImagePageSource.openFolder(resolver, folderUri)
         }
         if (!book.isReference || sourceUri.isNullOrBlank()) {
-            return@withContext openPrivateSource(bookFile(book), book.format, text, textPage, textDensity, book.id, startOffset)
+            return@withContext openPrivateSource(
+                bookFile(book), book.format, text, textPage, textDensity, book.id, startOffset, book.kind,
+            )
         }
         val descriptor = try {
             resolver.openFileDescriptor(Uri.parse(sourceUri), "r")
@@ -367,9 +376,10 @@ class LibraryRepository(context: Context) {
         } catch (_: IllegalArgumentException) {
             null
         } ?: throw LibraryException("原文件已不可访问，请重新导入这本书。")
-        when (book.format) {
-            FORMAT_ARCHIVE -> ImagePageSource.open(descriptor)
-            FORMAT_TEXT, FORMAT_EPUB -> {
+        when {
+            book.format == FORMAT_ARCHIVE -> ImagePageSource.open(descriptor)
+            book.format == FORMAT_EPUB && book.kind == KIND_COMIC -> openComicEpub(descriptor)
+            book.format == FORMAT_TEXT || book.format == FORMAT_EPUB -> {
                 val parsed = parsedDocuments.get(book.id)
                     ?: textDocuments.read(book.id)?.also { parsedDocuments.put(book.id, it) }
                 if (parsed != null) {
@@ -599,25 +609,48 @@ class LibraryRepository(context: Context) {
         false
     }
 
-    private suspend fun importLocked(uri: Uri, kind: Int): BookEntity {
+    private suspend fun importLocked(uri: Uri, kind: Int): ImportOutcome {
         currentCoroutineContext().ensureActive()
         MetadataRules.kind(kind)
         ensureDirectory(booksDirectory)
         ensureDirectory(coversDirectory)
         val name = displayName(uri)
+        var referenced: BookEntity? = null
         if (uri.scheme == "content") {
             try {
-                tryReferenceImport(uri, name, kind)?.let { return it }
+                referenced = tryReferenceImport(uri, name, kind)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
                 releaseGrantIfUnused(uri.toString())
                 throw error
             }
+            if (referenced != null) return ImportOutcome(referenced, comicEbookHint(referenced, kind))
             // The reference path declined this provider; do not keep a grant nothing will use.
             releaseGrantIfUnused(uri.toString())
         }
-        return importCopy(uri, name, kind)
+        val book = importCopy(uri, name, kind)
+        return ImportOutcome(book, comicEbookHint(book, kind))
+    }
+
+    /**
+     * An EPUB can hold a comic. The reader picked the shelf, so the book stays there, but the shelf
+     * is told the pages are pictures: an e-book shelf shows it as page labels, not as a comic.
+     */
+    private suspend fun comicEbookHint(book: BookEntity, kind: Int): String? {
+        if (kind != KIND_EBOOK || book.format != FORMAT_EPUB) return null
+        val comic = try {
+            if (book.isReference) {
+                val source = book.sourceUri?.let { runCatching { Uri.parse(it) }.getOrNull() }
+                val descriptor = source?.let { resolver.openFileDescriptor(it, "r") }
+                descriptor?.use { EpubComic.looksLikeComic(it) } ?: false
+            } else {
+                EpubComic.looksLikeComic(bookFile(book))
+            }
+        } catch (_: Exception) {
+            false
+        }
+        return if (comic) "疑似漫画，建议到「漫画」书架导入。" else null
     }
 
     /**
@@ -644,7 +677,7 @@ class LibraryRepository(context: Context) {
                 coverPart = storageOperation { File.createTempFile("cover-", ".part", coversDirectory) }
             }
             val pageCount = try {
-                useSession({ openReferenceSession(uri, probe.format, bookId = probe.digest) }) { session ->
+                useSession({ openReferenceSession(uri, probe.format, bookId = probe.digest, kind = kind) }) { session ->
                     coverPart?.let { destination ->
                         val extracted = probe.format == FORMAT_EPUB &&
                             writeEpubCover({ openSource(uri) }, destination)
@@ -670,7 +703,7 @@ class LibraryRepository(context: Context) {
                 kind = kind,
             )
             // Text books paginate for the device they are read on, so their count is no file property.
-            if (pageCount != book.pageCount && !isTextFormat(book.format)) {
+            if (pageCount != book.pageCount && !book.isTextBook) {
                 throw LibraryException("页数与原记录不一致，无法关联这份文件。")
             }
             currentCoroutineContext().ensureActive()
@@ -797,7 +830,7 @@ class LibraryRepository(context: Context) {
                 File.createTempFile("cover-", ".part", coversDirectory)
             }
             coverPart = coverTemp
-            val pageCount = validateAndCreateCover(part, coverTemp, probe.format, probe.digest)
+            val pageCount = validateAndCreateCover(part, coverTemp, probe.format, probe.digest, kind)
             val now = System.currentTimeMillis()
             val book = BookEntity(
                 id = probe.digest,
@@ -876,6 +909,7 @@ class LibraryRepository(context: Context) {
         textPage: PageSize = TextPageSource.CANONICAL_PAGE,
         textDensity: Float = TextPageSource.CANONICAL_DENSITY,
         bookId: String? = null,
+        kind: Int = KIND_EBOOK,
     ): PageSource {
         val descriptor = try {
             resolver.openFileDescriptor(uri, "r")
@@ -888,9 +922,10 @@ class LibraryRepository(context: Context) {
         } catch (_: IllegalArgumentException) {
             throw LibraryException("所选文件来源不可用，请从文件选择器重新选择。")
         } ?: throw LibraryException("所选文件不存在或暂时不可用，请重新选择。")
-        return when (format) {
-            FORMAT_ARCHIVE -> ImagePageSource.open(descriptor)
-            FORMAT_TEXT, FORMAT_EPUB -> TextPageSource.open(
+        return when {
+            format == FORMAT_ARCHIVE -> ImagePageSource.open(descriptor)
+            format == FORMAT_EPUB && kind == KIND_COMIC -> openComicEpub(descriptor)
+            format == FORMAT_TEXT || format == FORMAT_EPUB -> TextPageSource.open(
                 descriptor, format, text, textPage, textDensity, textLayoutCache, bookId,
             ).also { rememberDocument(bookId, it) }
             else -> {
@@ -908,9 +943,11 @@ class LibraryRepository(context: Context) {
         textDensity: Float = TextPageSource.CANONICAL_DENSITY,
         bookId: String? = null,
         startOffset: Int = 0,
-    ): PageSource = when (format) {
-        FORMAT_ARCHIVE -> ImagePageSource.open(file)
-        FORMAT_TEXT, FORMAT_EPUB -> {
+        kind: Int = KIND_EBOOK,
+    ): PageSource = when {
+        format == FORMAT_ARCHIVE -> ImagePageSource.open(file)
+        format == FORMAT_EPUB && kind == KIND_COMIC -> openComicEpub(file)
+        format == FORMAT_TEXT || format == FORMAT_EPUB -> {
             val parsed = bookId?.let { id ->
                 parsedDocuments.get(id) ?: textDocuments.read(id)?.also { parsedDocuments.put(id, it) }
             }
@@ -925,6 +962,22 @@ class LibraryRepository(context: Context) {
             ensurePdfBox()
             PdfSession.open(file)
         }
+    }
+
+    /** The image pages of a comic EPUB, in the order its spine declares them. */
+    private suspend fun openComicEpub(file: File): PageSource =
+        ImagePageSource.open(file, EpubComic.pages(file))
+
+    private suspend fun openComicEpub(descriptor: ParcelFileDescriptor): PageSource = try {
+        ImagePageSource.open(descriptor, EpubComic.pages(descriptor))
+    } catch (error: Throwable) {
+        // The session closes the descriptor on its own failures; this covers a parse failure before it.
+        try {
+            descriptor.close()
+        } catch (_: IOException) {
+            // Same.
+        }
+        throw error
     }
 
     /** A parsed book is immutable and keyed by its content hash, so it can be reused safely. */
@@ -1005,9 +1058,6 @@ class LibraryRepository(context: Context) {
         return Probe(hex(digest.digest()), format)
     }
 
-    /** Text layouts are rebuilt for every device, so their page count is not a property of the file. */
-    private fun isTextFormat(format: Int) = format == FORMAT_TEXT || format == FORMAT_EPUB
-
     /** Zips are either a comic archive or an EPUB; the package marker decides which. */
     private fun zipKind(file: File): Int = try {
         ZipFile(file).use { zip ->
@@ -1083,7 +1133,8 @@ class LibraryRepository(context: Context) {
         destination: File,
         format: Int,
         bookId: String? = null,
-    ): Int = useSession({ openPrivateSource(source, format, bookId = bookId) }) { session ->
+        kind: Int = KIND_EBOOK,
+    ): Int = useSession({ openPrivateSource(source, format, bookId = bookId, kind = kind) }) { session ->
         val extracted = format == FORMAT_EPUB && writeEpubCover(source, destination)
         if (!extracted) renderCover(session, destination)
         session.pageCount
@@ -1269,13 +1320,17 @@ class LibraryRepository(context: Context) {
         throw LibraryException(error.message ?: "书架数据无效。")
     }
 
+    /**
+     * EPUB is a container, not a reading surface: a comic shelf import is opened as image pages and
+     * a text-only package is refused there (and the other way around) once the package is read.
+     */
     private fun requireSupportedKind(kind: Int, format: Int) {
         when (kind) {
             KIND_EBOOK -> if (format != FORMAT_PDF && format != FORMAT_TEXT && format != FORMAT_EPUB) {
                 throw LibraryException("电子书书架只支持 PDF、EPUB 和 TXT，请确认文件格式。")
             }
-            else -> if (format == FORMAT_TEXT || format == FORMAT_EPUB) {
-                throw LibraryException("EPUB 和 TXT 属于电子书，请切换到「电子书」书架导入。")
+            else -> if (format == FORMAT_TEXT) {
+                throw LibraryException("TXT 属于电子书，请切换到「电子书」书架导入。")
             }
         }
     }
@@ -1289,7 +1344,7 @@ class LibraryRepository(context: Context) {
 
     private fun unsupportedFile(kind: Int) = LibraryException(
         if (kind == KIND_EBOOK) "这个文件不是电子书格式。电子书支持 PDF、EPUB 和 TXT。"
-        else "这个文件不是漫画格式。漫画支持 PDF，以及装有图片的 ZIP/CBZ 压缩包。",
+        else "这个文件不是漫画格式。漫画支持 PDF、装有图片的 ZIP/CBZ，以及图片版 EPUB。",
     )
 
     private fun hasPdfHeader(bytes: ByteArray, length: Int): Boolean {

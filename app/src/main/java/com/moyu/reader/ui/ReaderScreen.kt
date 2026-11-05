@@ -1,6 +1,11 @@
 package com.moyu.reader.ui
 
+import android.Manifest
 import android.app.Activity
+import android.content.ComponentCallbacks2
+import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.os.Build
 import android.provider.Settings
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
@@ -76,6 +81,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -96,13 +102,20 @@ import com.moyu.reader.data.KIND_EBOOK
 import com.moyu.reader.data.LibraryRepository
 import com.moyu.reader.data.MAX_PREFETCH_RADIUS
 import com.moyu.reader.data.MIN_PREFETCH_RADIUS
+import com.moyu.reader.data.PDF_TEXT_VIEW_AVAILABLE
 import com.moyu.reader.data.ReaderPreferences
 import com.moyu.reader.data.READ_VIEW_TEXT
+import com.moyu.reader.data.SpeechPreferences
 import com.moyu.reader.data.TEXT_READY
 import com.moyu.reader.data.TEXT_UNKNOWN
 import com.moyu.reader.data.TEXT_UNSUPPORTED
 import com.moyu.reader.page.PageSource
 import com.moyu.reader.pdf.PageSize
+import com.moyu.reader.speech.SpeechEngineInfo
+import com.moyu.reader.speech.SpeechEngines
+import com.moyu.reader.speech.SpeechReader
+import com.moyu.reader.speech.SpeechService
+import com.moyu.reader.speech.SpeechVoice
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -114,6 +127,12 @@ import kotlin.math.roundToInt
 
 // Typesetting taps settle before the whole book is measured again: five A+ steps cost one reflow.
 private const val REFLOW_SETTLE_MS = 200L
+// Load the next chapter while this many pages are still ahead: a fast fling must not reach the
+// end of the loaded window before the chapter arrives, or it stops dead at the last page.
+private const val NEXT_CHAPTER_PAGES_LEFT = 6
+// Keep this many pages of the previous chapter loaded before the reader settles near the start.
+// Prepending shifts page indices, so it must not run while a fling is still moving.
+private const val PREVIOUS_CHAPTER_PAGES_LEFT = 6
 
 @Composable
 fun ReaderScreen(
@@ -130,6 +149,9 @@ fun ReaderScreen(
     onTextReading: (Int?, String?, String?) -> Unit = { _, _, _ -> },
     onTextPosition: (Int, Int) -> Unit = { _, _ -> },
     onView: (Boolean) -> Unit = {},
+    speechPreferences: SpeechPreferences = SpeechPreferences(),
+    onSpeech: (String?, String?, Float) -> Unit = { _, _, _ -> },
+    onSpeechBackground: (Boolean) -> Unit = {},
 ) {
     var session by remember(book.id) { mutableStateOf<PageSource?>(null) }
     var restoredSize by remember(book.id) { mutableStateOf<PageSize?>(null) }
@@ -140,9 +162,11 @@ fun ReaderScreen(
     var textDocument by remember(book.id, retry) { mutableStateOf<TextDocument?>(null) }
     // Only e-book PDFs gain a flowing-text view; comics keep their pages untouched.
     val isPdf = book.format == FORMAT_PDF
-    val canHaveTextView = isPdf && book.kind == KIND_EBOOK
+    val canHaveTextView = PDF_TEXT_VIEW_AVAILABLE && isPdf && book.kind == KIND_EBOOK
     // A PDF reopens in the view it was last read in, once its text layer was proven usable.
-    var textView by rememberSaveable(book.id) { mutableStateOf(book.hasTextView && book.readView == READ_VIEW_TEXT) }
+    var textView by rememberSaveable(book.id) {
+        mutableStateOf(PDF_TEXT_VIEW_AVAILABLE && book.hasTextView && book.readView == READ_VIEW_TEXT)
+    }
     var pdfTextState by remember(book.id) { mutableIntStateOf(book.textState) }
     var pdfTextNotice by remember(book.id) { mutableStateOf<String?>(null) }
     var pdfAnchors by remember(book.id) { mutableStateOf<IntArray?>(null) }
@@ -186,7 +210,49 @@ fun ReaderScreen(
             }
         }
     }
-    val isText = book.format == FORMAT_TEXT || book.format == FORMAT_EPUB || (isPdf && textView)
+    val isText = book.isTextBook || (isPdf && textView)
+    val context = LocalContext.current
+    // Reading aloud runs on the device's own speech engine. The engines are looked up once and
+    // kept: probing them starts them, which is far too slow to do on every visit.
+    val speech = remember(book.id) { SpeechReader(context) }
+    // Background playback shows a notification; ask for the notification permission on first use.
+    val notificationPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { }
+    val setSpeechBackground: (Boolean) -> Unit = { enabled ->
+        if (enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        onSpeechBackground(enabled)
+    }
+    DisposableEffect(book.id) { onDispose { speech.release() } }
+    // A reading that survived in the background must not outlive the reader either.
+    DisposableEffect(book.id) {
+        onDispose {
+            SpeechService.stop(context.applicationContext)
+            SpeechService.stopReading = null
+        }
+    }
+    var engines by remember(book.id) { mutableStateOf<List<SpeechEngineInfo>>(emptyList()) }
+    LaunchedEffect(book.id, isText) {
+        if (!isText) return@LaunchedEffect
+        val found = try {
+            SpeechEngines.load(context)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            emptyList()
+        }
+        // Only engines that can read Chinese are of any use to a reader of Chinese books.
+        engines = found.filter { it.chinese }
+    }
+    // Covers belong to the shelf. While a book is open they are dead weight: the page cache the
+    // reader needs is worth more than artwork of a list that is not on screen. They are decoded
+    // again when the reader goes back.
+    LaunchedEffect(book.id) { clearCoverCache() }
     val configuration = LocalConfiguration.current
     val density = LocalDensity.current
     // Text books paginate for the real window; comics keep PDF-land sizing untouched.
@@ -215,7 +281,7 @@ fun ReaderScreen(
         relinking = true
         scope.launch {
             try {
-                val matched = repository.importFile(uri)
+                val matched = repository.importFile(uri, book.kind).book
                 if (matched.id == book.id) {
                     error = null
                     // The original may have been unreachable when the text layer was probed.
@@ -259,7 +325,7 @@ fun ReaderScreen(
     }
     // Page anchors bridge the PDF view and the text view; they also explain a missing text layer.
     LaunchedEffect(book.id, pdfTextState) {
-        if (!isPdf) {
+        if (!isPdf || !PDF_TEXT_VIEW_AVAILABLE) {
             pdfAnchors = null
             pdfTextNotice = null
             return@LaunchedEffect
@@ -291,6 +357,11 @@ fun ReaderScreen(
             return@LaunchedEffect
         }
         pdfTextState = state
+    }
+    // The PDF text view is hidden; a book last read in it goes back to its original pages so the
+    // saved position, the shelf label and the stored preference all speak the same layout again.
+    LaunchedEffect(book.id) {
+        if (isPdf && !PDF_TEXT_VIEW_AVAILABLE && book.readView == READ_VIEW_TEXT) onView(false)
     }
     LaunchedEffect(book.id, retry, openRevision, textSettings, isText) {
         // Consume the jump request before any suspension: a newer jump restarts this effect, and
@@ -363,9 +434,7 @@ fun ReaderScreen(
             pendingOffset = null
             session = opened
             if (text != null) textDocument = text.document
-            if (text != null && (current.format == FORMAT_TEXT || current.format == FORMAT_EPUB) &&
-                current.textAnchors == 0
-            ) {
+            if (text != null && current.isTextBook && current.textAnchors == 0) {
                 // One-time conversion; a failure only delays it to the next visit.
                 try { repository.migrateTextBookmarks(current, text.characterCount) } catch (_: Exception) { }
             }
@@ -405,7 +474,7 @@ fun ReaderScreen(
     val renderer = session
     if (renderer != null) {
         val bookmarkFlow = remember(book.id) {
-            if (book.format == FORMAT_TEXT || book.format == FORMAT_EPUB) repository.textBookmarks(book.id)
+            if (book.isTextBook) repository.textBookmarks(book.id)
             else repository.bookmarks(book.id)
         }
         val bookmarks by bookmarkFlow.collectAsStateWithLifecycle(emptyList())
@@ -413,7 +482,7 @@ fun ReaderScreen(
             textSettings, restorePage,
             pdfTextView = isPdf && textView,
             pdfAnchors = pdfAnchors,
-            viewState = if (isPdf) PdfViewState(
+            viewState = if (isPdf && PDF_TEXT_VIEW_AVAILABLE) PdfViewState(
                 textView = textView,
                 available = pdfTextState == TEXT_READY && pdfAnchors != null,
                 preparing = canHaveTextView && pdfTextState == TEXT_UNKNOWN,
@@ -440,6 +509,11 @@ fun ReaderScreen(
             },
             onBack, onPosition, onBookmark, onBrightness, onRightToLeft,
             handleTextSettings, onTextPosition,
+            speech = speech,
+            engines = engines,
+            speechPreferences = speechPreferences,
+            onSpeech = onSpeech,
+            onSpeechBackground = setSpeechBackground,
             initialScroll = restoreScroll,
             onRestoreConsumed = { restorePage = null },
             onChapterJump = { chapter ->
@@ -520,6 +594,11 @@ private fun ReaderContent(
     onRightToLeft: (Boolean) -> Unit,
     onTextSettings: (TextReadingSettings, Long) -> Unit,
     onTextPosition: (Int, Int) -> Unit,
+    speech: SpeechReader,
+    engines: List<SpeechEngineInfo>,
+    speechPreferences: SpeechPreferences,
+    onSpeech: (String?, String?, Float) -> Unit,
+    onSpeechBackground: (Boolean) -> Unit,
     initialScroll: Int,
     onRestoreConsumed: () -> Unit,
     onChapterJump: (Int) -> Unit,
@@ -536,6 +615,9 @@ private fun ReaderContent(
     var pendingJump by remember(session) { mutableStateOf<Int?>(null) }
     // A chapter window prepend shifts page indices; this keeps the visible in-page pixel with it.
     var pendingJumpScroll by remember(session) { mutableIntStateOf(0) }
+    // Where a reading-mode switch is heading, kept until the new layout has actually landed so an
+    // exit in between still saves the page the reader switched to, not the old one.
+    var modeSwitch by remember(session) { mutableStateOf<Pair<Int, Int>?>(null) }
     var offset by remember(session, book.id) { mutableIntStateOf(initialScroll) }
     var chrome by remember(book.id) { mutableStateOf(false) }
     var panel by remember(book.id) { mutableStateOf<ReaderPanel?>(null) }
@@ -555,7 +637,9 @@ private fun ReaderContent(
     val pagerState = key(session) {
         rememberPagerState(initialPage = startPage, pageCount = { pageCount })
     }
-    val viewport = remember(book.id, mode, session) { ReaderViewportState(listState, pagerState, mode == "vertical") }
+    // One viewport lives for the whole session: switching between vertical scrolling and horizontal
+    // paging keeps the same pending-jump gate, so neither state can report a stale page.
+    val viewport = remember(book.id, session) { ReaderViewportState(listState, pagerState, mode == "vertical") }
     PreloadZoomMetadata(viewport, session, session::cachedPageSize, session::pageSize)
     // Only pages around the viewport may own a rendered bitmap; everything else is released at once.
     val keepPages by remember(viewport) {
@@ -581,9 +665,15 @@ private fun ReaderContent(
         }
     }
     val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner, session) {
+    // The key must include the flag: the observer reads it when the app stops, not when it is set up.
+    DisposableEffect(lifecycleOwner, session, speech, speechPreferences.background) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) session.trimMemory()
+            if (event == Lifecycle.Event.ON_STOP) {
+                session.trimMemory()
+                // Background playback keeps going only when the reader asked for it; otherwise
+                // the phone would keep talking with no notification behind it.
+                if (!speechPreferences.background) speech.pause()
+            }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
@@ -593,6 +683,21 @@ private fun ReaderContent(
     val textPositionCallback by rememberUpdatedState(onTextPosition)
     val view = LocalView.current
     val activity = LocalContext.current as Activity
+    // Under real memory pressure the page cache is the first thing worth giving up: it rebuilds
+    // from the layout cache, while the alternative is the reader being killed. The activity drops
+    // covers and shelf caches at the same level.
+    DisposableEffect(session, activity) {
+        val callbacks = object : ComponentCallbacks2 {
+            override fun onTrimMemory(level: Int) {
+                if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) session.trimMemory()
+            }
+            override fun onLowMemory() = session.trimMemory()
+            override fun onConfigurationChanged(newConfig: Configuration) = Unit
+        }
+        val app = activity.applicationContext
+        app.registerComponentCallbacks(callbacks)
+        onDispose { app.unregisterComponentCallbacks(callbacks) }
+    }
     // Text books paint the whole surface (status bar included) with their reading theme.
     val isText = textSettings != null
     val textTheme = textSettings?.theme ?: TextThemes.default
@@ -615,7 +720,7 @@ private fun ReaderContent(
     val jumpAndClose: (Int) -> Unit = { page -> jump(page); panel = null }
     val textSource = session as? TextPageSource
     // Pure text marks are character anchors: window pages disappear when type or chapter changes.
-    val pureText = book.format == FORMAT_TEXT || book.format == FORMAT_EPUB
+    val pureText = book.isTextBook
     val offsetMarks = pureText && textSource != null
     // The one formula every text position goes through: page + in-page pixel -> first visible line.
     val anchorAt: (TextPageSource, Int, Int, Boolean) -> Int = { source, page, scroll, vertical ->
@@ -641,6 +746,110 @@ private fun ReaderContent(
     }
     // The frozen anchor shown by the open toolbar. It is captured when the chrome is revealed.
     var chromeAnchor by remember(session, book.id) { mutableIntStateOf(0) }
+    // The engine in use: the one the reader chose, else the device default, else the first engine
+    // that can read Chinese. A voice belongs to its engine, so it is looked up there.
+    val speechEngine = remember(engines, speechPreferences.engine) {
+        engines.firstOrNull { it.packageName == speechPreferences.engine }?.packageName
+            ?: engines.firstOrNull { it.packageName == SpeechEngines.defaultEngine(activity) }?.packageName
+            ?: engines.firstOrNull()?.packageName
+    }
+    val speechVoices = remember(engines, speechEngine) {
+        engines.firstOrNull { it.packageName == speechEngine }?.voices.orEmpty()
+    }
+    val speechVoice = remember(speechVoices, speechPreferences.voice) {
+        // The stored value is the voice key (name + locale); older rows stored only the name.
+        speechVoices.firstOrNull { it.key == speechPreferences.voice }
+            ?: speechVoices.firstOrNull { it.name == speechPreferences.voice }
+            // Nothing chosen yet: the engine's first voice is what it would use anyway.
+            ?: speechVoices.firstOrNull()
+    }
+    // Reading aloud needs text to read and an engine that can read Chinese.
+    val speechAvailable = engines.isNotEmpty() && textSource != null
+    // Starting the reading takes the text from the line on screen to the end of the book.
+    val startSpeech: () -> Unit = {
+        val source = textSource
+        if (source != null) {
+            val paragraphs = source.paragraphsFrom(currentLineAnchorNow())
+            if (paragraphs.isNotEmpty()) {
+                scope.launch {
+                    speech.start(paragraphs, speechEngine, speechVoice, speechPreferences.rate)
+                }
+            }
+        }
+    }
+    val toggleSpeech: () -> Unit = {
+        when (speech.status) {
+            SpeechReader.Status.Playing -> speech.pause()
+            SpeechReader.Status.Paused -> speech.resume()
+            else -> startSpeech()
+        }
+    }
+    val stopSpeech: () -> Unit = { speech.stop() }
+    // The sentence being read is marked on the page itself, so the eye can follow the voice.
+    val speechHighlight = speech.line?.let { line ->
+        TextPageSource.Highlight(line.offset, line.offset + line.text.length)
+    }
+    // A sleep timer belongs to this reading session; picking a new value restarts the countdown.
+    // The remaining seconds are only read inside the speech panel, so the ticking state does not
+    // invalidate the whole reader canvas every second.
+    var sleepMinutes by remember(book.id) { mutableIntStateOf(0) }
+    val sleepRemaining = remember(book.id) { mutableIntStateOf(0) }
+    LaunchedEffect(sleepMinutes) {
+        if (sleepMinutes <= 0) {
+            sleepRemaining.intValue = 0
+            return@LaunchedEffect
+        }
+        var seconds = sleepMinutes * 60
+        sleepRemaining.intValue = seconds
+        while (seconds > 0) {
+            delay(1_000L)
+            seconds -= 1
+            sleepRemaining.intValue = seconds
+        }
+        speech.stop()
+        sleepMinutes = 0
+    }
+    // Background playback runs in a foreground service: it keeps the process alive and shows
+    // what is being read. Without that service the system may freeze the app mid-sentence.
+    LaunchedEffect(speechPreferences.background, speech.status, speech.line?.text) {
+        val reading = speech.status == SpeechReader.Status.Playing ||
+            speech.status == SpeechReader.Status.Paused
+        if (speechPreferences.background && reading) {
+            SpeechService.start(activity.applicationContext, book.title, speech.line?.text)
+        } else {
+            SpeechService.stop(activity.applicationContext)
+        }
+    }
+    DisposableEffect(speech) {
+        // The notification's stop button reaches this reader while it is alive.
+        SpeechService.stopReading = { speech.stop() }
+        onDispose { SpeechService.stopReading = null }
+    }
+    // Keep the sentence being read on screen. A page is a screenful, so following page changes is
+    // enough; a sentence that ran past the loaded window reopens it at that offset.
+    LaunchedEffect(speech.line?.offset, speech.status, session, mode, restorePage, viewport.viewport) {
+        val line = speech.line ?: return@LaunchedEffect
+        if (restorePage != null || speech.status != SpeechReader.Status.Playing) return@LaunchedEffect
+        val source = textSource ?: return@LaunchedEffect
+        // While zoomed the page is larger than the viewport and panning owns the position.
+        if (viewport.zoom > 1.01f) return@LaunchedEffect
+        if (source.lineAnchorInWindow(line.offset) == null) {
+            onAnchorJump(line.offset)
+            return@LaunchedEffect
+        }
+        val position = source.positionForCharOffset(line.offset, viewport.viewport.width)
+        if (mode == "vertical") {
+            val item = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == position.page }
+            val height = viewport.viewport.height
+            val y = item?.let { it.offset + position.pageOffset }
+            // Only pull a page up when its sentence sits below the part of it on screen.
+            if (y == null || y < 0 || (height > 0 && y > height * 0.85f)) {
+                listState.requestScrollToItem(position.page, 0)
+            }
+        } else if (pagerState.currentPage != position.page) {
+            scope.launch { pagerState.scrollToPage(position.page) }
+        }
+    }
     // A bookmark whose saved anchor maps to the current line in the current layout.
     val bookmarkAtLine: (Int) -> Int? = { anchor ->
         if (offsetMarks) {
@@ -662,7 +871,13 @@ private fun ReaderContent(
     // Pages are replaced when a chapter is loaded; the revision must invalidate the cached percent,
     // otherwise a TOC jump that lands on the same page index leaves the old chapter label on screen.
     val textPageFraction = remember(textSource, chromeAnchor, currentPage, pageCount, pagesVersion) {
-        textSource?.progressFractionForOffset(chromeAnchor) ?: 0f
+        val source = textSource
+        when {
+            source == null -> 0f
+            // A line anchor never reaches the book end; the last page is what "read to the end" is.
+            source.isLastPageOfBook(currentPage) -> 100f
+            else -> source.progressFractionForOffset(chromeAnchor)
+        }
     }
     // Bookmarks, progress and the page label stay in PDF pages, whichever view is on screen.
     val pdfPage = if (pdfTextView && pdfAnchors != null && textSource != null) {
@@ -729,7 +944,10 @@ private fun ReaderContent(
                 // Pages are window-local; only the mode belongs to the PDF progress row now.
                 positionCallback(0, 0, mode)
             }
-            textPositionCallback(anchor, source.progressPercentForOffset(anchor))
+            textPositionCallback(
+                anchor,
+                if (source.isLastPageOfBook(page)) 100 else source.progressPercentForOffset(anchor),
+            )
         } else {
             positionCallback(page, scroll, mode)
         }
@@ -742,23 +960,35 @@ private fun ReaderContent(
             onTextSettings(transform(current), offset)
         }
     }
+    // A comic's last page may be shorter than the viewport, so it can never become the first
+    // visible item. Scrolled to the bottom is then the real "last page"; report it instead of the
+    // page before it, or the label, progress and saved position all stop one page short.
+    val atComicEnd: () -> Boolean = {
+        textSource == null && pageCount > 0 && !listState.canScrollForward &&
+            listState.layoutInfo.visibleItemsInfo.let { it.isNotEmpty() && it.size < pageCount }
+    }
     // The settle collector runs a frame after the page stops; leaving must save the page that is
     // actually on screen or a quick exit records the previous page.
     val saveVisiblePosition by rememberUpdatedState {
         if (restorePage == null && pageCount > 0) {
             val jump = pendingJump
+            val switched = modeSwitch
+            val atEnd = mode == "vertical" && atComicEnd()
             val page = when {
-                mode == "vertical" -> jump ?: listState.firstVisibleItemIndex
+                switched != null -> switched.first
+                jump != null -> jump
+                mode == "vertical" -> if (atEnd) pageCount - 1 else listState.firstVisibleItemIndex
                 // targetPage is where the pager was heading when the user left, so a quick exit
                 // during the snap animation does not record the previous page.
-                jump != null -> jump
                 else -> pagerState.targetPage
             }
             val safePage = page.coerceIn(0, pageCount - 1)
             val scroll = when {
+                switched != null -> if (mode == "vertical") switched.second else 0
                 mode != "vertical" -> 0
                 // A chapter prepend has already shifted the page index but not yet settled.
                 jump != null -> pendingJumpScroll
+                atEnd -> 0
                 else -> normalizedPageOffset(listState.firstVisibleItemScrollOffset, viewport.measuredZoom)
             }
             reportPosition(safePage, scroll, mode)
@@ -810,7 +1040,8 @@ private fun ReaderContent(
         if (chrome) controller.show(WindowInsetsCompat.Type.systemBars()) else controller.hide(WindowInsetsCompat.Type.systemBars())
         onDispose { controller.show(WindowInsetsCompat.Type.systemBars()) }
     }
-    LaunchedEffect(viewport, restorePage) {
+    // Keyed by mode as well: switching direction changes which scroll state owns the position.
+    LaunchedEffect(viewport, restorePage, mode) {
         // No page report may race the restore jump: otherwise page zero can overwrite the anchor.
         if (restorePage != null) return@LaunchedEffect
         if (mode == "vertical") {
@@ -818,12 +1049,18 @@ private fun ReaderContent(
             // requested it. Do not call a suspend scroll here either: a user drag would cancel
             // the effect before the snapshotFlow below could ever start.
             snapshotFlow {
-                if (pendingJump != null || viewport.hasPendingAnchor) null
-                else listState.firstVisibleItemIndex to
-                    normalizedPageOffset(listState.firstVisibleItemScrollOffset, viewport.measuredZoom)
+                when {
+                    pendingJump != null || viewport.hasPendingAnchor -> null
+                    // Scrolled to the bottom of a comic: the (short) last page cannot become the
+                    // first visible item, so this is the only way to report it as the current page.
+                    atComicEnd() -> (pageCount - 1) to 0
+                    else -> listState.firstVisibleItemIndex to
+                        normalizedPageOffset(listState.firstVisibleItemScrollOffset, viewport.measuredZoom)
+                }
             }.distinctUntilChanged().collect { position ->
                 if (position != null) {
                     val (page, scroll) = position
+                    modeSwitch = null
                     currentPage = page
                     offset = scroll
                     reportPosition(page, scroll, mode)
@@ -835,6 +1072,7 @@ private fun ReaderContent(
                 else pagerState.settledPage
             }.distinctUntilChanged().collect { page ->
                 if (page != null) {
+                    modeSwitch = null
                     currentPage = page
                     offset = 0
                     reportPosition(page, 0, mode)
@@ -845,36 +1083,46 @@ private fun ReaderContent(
     LaunchedEffect(pendingJump) {
         if (pendingJump == null) pendingPercent = null
     }
-    LaunchedEffect(viewport) {
+    LaunchedEffect(viewport, mode) {
         snapshotFlow { if (mode == "vertical") listState.isScrollInProgress else pagerState.isScrollInProgress }
             .distinctUntilChanged().collect { scrolling -> if (scrolling) chrome = false }
     }
-    LaunchedEffect(session, currentPage, pageCount, mode, restorePage) {
+    LaunchedEffect(session, pageCount, mode, restorePage) {
         // Chapter windows are grown just before the reader reaches an edge, so a page turn never
-        // runs into a "no page" wall. Prepending shifts indices, so the visible page is restored.
+        // runs into a "no page" wall. The page is observed instead of being one of the effect keys:
+        // a fling changes it every frame, and re-keying the effect cancelled the chapter load
+        // before it could finish. The window then ran out under the fling and stopped dead at the
+        // last loaded page.
         if (restorePage != null) return@LaunchedEffect
         val source = session as? TextPageSource ?: return@LaunchedEffect
-        if (currentPage >= pageCount - 2 && source.hasNextChapter()) {
-            // An empty chapter can paginate to zero pages. Keep advancing through such chapters
-            // instead of letting one zero-page slice permanently stop the window at its edge.
-            var added = 0
-            while (added == 0 && source.hasNextChapter()) {
-                added = source.loadNextChapter()
+        snapshotFlow {
+            currentPage to (if (mode == "vertical") listState.isScrollInProgress else pagerState.isScrollInProgress)
+        }.distinctUntilChanged().collect { (page, scrolling) ->
+            if (page >= pageCount - NEXT_CHAPTER_PAGES_LEFT && source.hasNextChapter()) {
+                // An empty chapter can paginate to zero pages. Keep advancing through such chapters
+                // instead of letting one zero-page slice permanently stop the window at its edge.
+                var added = 0
+                while (added == 0 && source.hasNextChapter()) {
+                    added = source.loadNextChapter()
+                }
+                if (added > 0) pagesVersion++
             }
-            if (added > 0) pagesVersion++
-        }
-        if (currentPage <= 1 && source.hasPreviousChapter()) {
-            val keepScroll = offset
-            var added = 0
-            while (added == 0 && source.hasPreviousChapter()) {
-                added = source.loadPreviousChapter()
-            }
-            if (added > 0) {
-                pagesVersion++
-                currentPage += added
-                pendingJump = currentPage
-                // Page indices shifted, the line on screen did not: carry its pixel offset.
-                pendingJumpScroll = keepScroll
+            // Prepending shifts every page index, so the visible page must be requested again:
+            // that cancels a running fling. Wait for the reader to settle, otherwise a backward
+            // fling is cut dead in its tracks.
+            if (!scrolling && page <= PREVIOUS_CHAPTER_PAGES_LEFT && source.hasPreviousChapter()) {
+                val keepScroll = offset
+                var added = 0
+                while (added == 0 && source.hasPreviousChapter()) {
+                    added = source.loadPreviousChapter()
+                }
+                if (added > 0) {
+                    pagesVersion++
+                    currentPage += added
+                    pendingJump = currentPage
+                    // Page indices shifted, the line on screen did not: carry its pixel offset.
+                    pendingJumpScroll = keepScroll
+                }
             }
         }
     }
@@ -921,29 +1169,54 @@ private fun ReaderContent(
             }
         }, onGesture = { chrome = false }) { baseSize, bounds, zoom, expanded ->
             PrefetchPages(session, currentPage, pageCount, baseSize, mode, scrolling, zoom, prefetchRadius)
-            if (mode == "vertical") {
-                LazyColumn(state = listState, modifier = expanded.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(4.dp * zoom)) {
-                    items(pageCount, key = { it }) { page ->
-                        PdfPage(session, page, Modifier.fillMaxWidth(),
-                            initialSize = if (!pdfTextView && page == restoredPage) restoredSize else null,
-                            baseViewport = baseSize, viewportBounds = bounds, zoom = zoom,
-                            keep = page in keepPages, scrolling = scrolling, visible = page in visiblePages,
-                            pageBackground = pageBackground, onPageReady = viewport::pageReady)
-                    }
+            // Flowing text is a single vector drawing surface behind the scrolling pages: the list
+            // and the pager only reserve each page's rectangle, and one native layer paints them.
+            // It has to stay first in this Box: a native view takes the touch hit, so drawing it
+            // under the scrolling surface is what leaves every swipe to the list and the pager.
+            Box(expanded.fillMaxSize()) {
+                if (textSource != null) {
+                    TextPageLayer(
+                        source = textSource,
+                        vertical = mode == "vertical",
+                        listState = listState,
+                        pagerState = pagerState,
+                        onPageReady = viewport::pageReady,
+                        modifier = Modifier.fillMaxSize(),
+                        highlight = speechHighlight,
+                    )
                 }
-            } else {
-                // Keep one page on each side composed: it already owns its bitmap, so the page a
-                // swipe reveals is drawn from the first frame. A page composed only mid-swipe has
-                // to show a spinner, then a half-width preview, then the full page — the blink
-                // that turning back used to cause.
-                HorizontalPager(state = pagerState, modifier = expanded.fillMaxSize(), reverseLayout = preferences.rightToLeft,
-                    userScrollEnabled = zoom <= 1.01f, beyondViewportPageCount = 1) { page ->
-                    PdfPage(session, page, Modifier.fillMaxSize(), fit = true,
-                        baseViewport = baseSize, viewportBounds = bounds, zoom = zoom,
-                        // While zoomed no page turn is possible, so only the page on screen keeps a bitmap.
-                        keep = zoom <= 1.01f || page == pagerState.currentPage,
-                        defer = page != pagerState.currentPage,
-                        scrolling = scrolling, pageBackground = pageBackground, onPageReady = viewport::pageReady)
+                if (mode == "vertical") {
+                    LazyColumn(state = listState, modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(4.dp * zoom)) {
+                        items(pageCount, key = { it }) { page ->
+                            if (textSource != null) {
+                                TextPagePlaceholder(textSource, page, Modifier.fillMaxWidth())
+                            } else {
+                                PdfPage(session, page, Modifier.fillMaxWidth(),
+                                    initialSize = if (!pdfTextView && page == restoredPage) restoredSize else null,
+                                    baseViewport = baseSize, viewportBounds = bounds, zoom = zoom,
+                                    keep = page in keepPages, scrolling = scrolling, visible = page in visiblePages,
+                                    pageBackground = pageBackground, onPageReady = viewport::pageReady)
+                            }
+                        }
+                    }
+                } else {
+                    // Keep one page on each side composed: it already owns its bitmap, so the page a
+                    // swipe reveals is drawn from the first frame. A page composed only mid-swipe has
+                    // to show a spinner, then a half-width preview, then the full page — the blink
+                    // that turning back used to cause.
+                    HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize(), reverseLayout = preferences.rightToLeft,
+                        userScrollEnabled = zoom <= 1.01f, beyondViewportPageCount = 1) { page ->
+                        if (textSource != null) {
+                            TextPagePlaceholder(textSource, page, Modifier.fillMaxSize(), fit = true)
+                        } else {
+                            PdfPage(session, page, Modifier.fillMaxSize(), fit = true,
+                                baseViewport = baseSize, viewportBounds = bounds, zoom = zoom,
+                                // While zoomed no page turn is possible, so only the page on screen keeps a bitmap.
+                                keep = zoom <= 1.01f || page == pagerState.currentPage,
+                                defer = page != pagerState.currentPage,
+                                scrolling = scrolling, pageBackground = pageBackground, onPageReady = viewport::pageReady)
+                        }
+                    }
                 }
             }
         }
@@ -977,13 +1250,48 @@ private fun ReaderContent(
                 }
             }
         }
+        AnimatedVisibility(
+            visible = !chrome && (speech.status == SpeechReader.Status.Playing || speech.status == SpeechReader.Status.Paused),
+            modifier = Modifier.align(Alignment.BottomCenter),
+            enter = fadeIn(tween(motionDuration)) + slideInVertically(tween(motionDuration)) { it },
+            exit = fadeOut(tween(motionDuration)) + slideOutVertically(tween(motionDuration)) { it },
+        ) {
+            SpeechBar(
+                text = speech.line?.text.orEmpty(),
+                status = speech.status,
+                onToggle = toggleSpeech,
+                onStop = stopSpeech,
+                modifier = Modifier.navigationBarsPadding().padding(16.dp),
+            )
+        }
         AnimatedVisibility(chrome, Modifier.align(Alignment.BottomCenter), enter = fadeIn(tween(motionDuration)) + slideInVertically(tween(motionDuration)) { it }, exit = fadeOut(tween(motionDuration)) + slideOutVertically(tween(motionDuration)) { it }) {
             val switchMode: (String) -> Unit = { value ->
                 if (mode != value) {
-                    viewport.resetForJump(currentPage)
-                    offset = 0
+                    // Read the page from the state that is actually driving the screen. While a
+                    // fling is still running the pager has not settled yet, so its target is the
+                    // page the reader is looking at.
+                    val jump = pendingJump
+                    val page = when {
+                        jump != null -> jump
+                        mode == "vertical" -> listState.firstVisibleItemIndex
+                        else -> pagerState.targetPage
+                    }.coerceIn(0, pageCount - 1)
+                    val scroll = when {
+                        value != "vertical" -> 0
+                        jump != null -> pendingJumpScroll
+                        mode == "vertical" -> normalizedPageOffset(listState.firstVisibleItemScrollOffset, viewport.measuredZoom)
+                        else -> 0
+                    }
+                    // Both scroll states are put on the same page, and the viewport keeps gating
+                    // position reports until the new layout has measured that page. Without this
+                    // the freshly started collector would report the other state's stale page.
+                    viewport.setReadingMode(value == "vertical")
+                    viewport.resetForJump(page, scroll)
+                    modeSwitch = page to scroll
+                    currentPage = page
+                    offset = scroll
                     mode = value
-                    reportPosition(currentPage, 0, value)
+                    reportPosition(page, scroll, value)
                 }
                 panel = null
             }
@@ -1084,6 +1392,7 @@ private fun ReaderContent(
                                 isText = isText,
                                 mode = mode,
                                 brightness = brightness,
+                                speechAvailable = speechAvailable,
                                 onPanel = { panel = it },
                             )
                         }
@@ -1113,6 +1422,38 @@ private fun ReaderContent(
                                 }
                             }
                         }
+                        ReaderPanel.Speech -> SpeechPanel(
+                            engines = engines,
+                            engine = speechEngine,
+                            voices = speechVoices,
+                            voice = speechVoice?.key,
+                            rate = speechPreferences.rate,
+                            status = speech.status,
+                            reading = speech.line?.text,
+                            failure = speech.failure,
+                            background = speechPreferences.background,
+                            sleepMinutes = sleepMinutes,
+                            sleepRemaining = { sleepRemaining.intValue },
+                            onEngine = { packageName ->
+                                // A voice belongs to its engine, so switching engines drops it.
+                                onSpeech(packageName, null, speechPreferences.rate)
+                                scope.launch { speech.useEngine(packageName) }
+                            },
+                            onVoice = { key ->
+                                val picked = speechVoices.firstOrNull { it.key == key }
+                                    ?: speechVoices.firstOrNull { it.name == key }
+                                onSpeech(speechEngine, key, speechPreferences.rate)
+                                speech.setVoice(picked)
+                            },
+                            onRateFinished = { value ->
+                                onSpeech(speechEngine, speechPreferences.voice, value)
+                                speech.applyRate(value)
+                            },
+                            onBackground = onSpeechBackground,
+                            onSleepMinutes = { sleepMinutes = it },
+                            onToggle = toggleSpeech,
+                            onStop = stopSpeech,
+                        )
                         ReaderPanel.View -> viewState?.let { state ->
                             ViewPanel(state, onPick = { wanted ->
                                 panel = null

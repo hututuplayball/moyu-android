@@ -10,9 +10,12 @@ import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
 import android.util.LruCache
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.setValue
 import com.moyu.reader.data.FORMAT_EPUB
 import com.moyu.reader.page.PageSource
-import com.moyu.reader.page.pageCacheLimit
+import com.moyu.reader.page.textPageCacheLimit
 import com.moyu.reader.pdf.PageSize
 import java.io.File
 import java.io.FileInputStream
@@ -28,9 +31,10 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
- * Lays a [TextDocument] out into fixed-size pages and draws them as bitmaps. Text stays vector at
- * any render width, so prefetch, zoom tiles and covers are all sharp. It implements the shared
- * [PageSource] contract, so the reading surface, bookmarks and progress work like PDF and comics.
+ * Lays a [TextDocument] out into fixed-size pages. Text stays vector at any render width, so the
+ * reader can paint a page straight onto its own view (see [drawOn]) and prefetch, zoom tiles and
+ * covers stay sharp through [render]. It implements the shared [PageSource] contract, so the
+ * reading surface, bookmarks and progress work like PDF and comics.
  */
 class TextPageSource private constructor(
     private val doc: TextDocument,
@@ -44,6 +48,9 @@ class TextPageSource private constructor(
     data class TocEntry(val title: String, val page: Int)
     /** A line anchor and the page position that brings that line to the top of the viewport. */
     data class TextPosition(val page: Int, val pageOffset: Int, val charOffset: Int)
+
+    /** A character range the reader highlights on the page while the machine reads it aloud. */
+    data class Highlight(val start: Int, val end: Int)
 
     private val pageWidth = rawWidth.coerceIn(MIN_PAGE_WIDTH, MAX_WIDTH)
     private val pageHeight = rawHeight.coerceIn(MIN_PAGE_HEIGHT, MAX_HEIGHT)
@@ -78,10 +85,11 @@ class TextPageSource private constructor(
     }
     private val layoutMutex = Mutex()
 
-    private val cacheLimit = pageCacheLimit()
+    private val cacheLimit = textPageCacheLimit()
     private val bitmaps = object : LruCache<RenderKey, Bitmap>(cacheLimit) {
         override fun sizeOf(key: RenderKey, value: Bitmap): Int = value.allocationByteCount
     }
+    private val highlightPaint = Paint()
 
     private var pages: List<TextPage> = emptyList()
     // A text book is laid out one chapter at a time; pages before the loaded window do not exist.
@@ -153,10 +161,11 @@ class TextPageSource private constructor(
     }
 
     override val pageCount: Int get() = pages.size
-    /** A text page is a few draw calls into a bitmap, so it can stay sharp during a swipe. */
+    /** Text pages are a few vector draw calls, so they can stay sharp during a swipe. */
     override val sharpWhileScrolling: Boolean get() = true
-    @Volatile
-    private var generation = 0
+    // Compose state: a page draws from the current window, so a rebuilt page list (or a new theme)
+    // must invalidate the drawing it already produced.
+    private var generation by mutableIntStateOf(0)
     override val renderVersion: Int get() = generation
     override fun cachedPageSize(index: Int): PageSize? = if (index in 0 until pageCount) layoutSize else null
 
@@ -311,6 +320,43 @@ class TextPageSource private constructor(
         return (offset.coerceIn(0, totalChars) * 100f / totalChars).coerceIn(0f, 100f)
     }
 
+    /**
+     * True when [page] is the last page of the book, not merely of the loaded chapter window.
+     * A line anchor is the start of a line, so it never equals the book end; reaching the final
+     * page is what "read to the end" means, and the stored percentage can then reach 100.
+     */
+    fun isLastPageOfBook(page: Int): Boolean {
+        if (pages.isEmpty() || page != pages.lastIndex) return false
+        return slices.lastOrNull()?.index == chapters.lastIndex
+    }
+
+    /**
+     * The text from [offset] to the end of the book, as (book offset, text) pairs.
+     *
+     * Reading aloud crosses chapters, so this walks the whole document instead of the pages that
+     * happen to be on screen. The first pair starts exactly at [offset], which is how the reading
+     * picks up where the reader is.
+     */
+    fun paragraphsFrom(offset: Int): List<Pair<Int, String>> {
+        if (doc.paragraphs.isEmpty()) return emptyList()
+        val start = offset.coerceIn(0, totalChars)
+        val first = paragraphForOffset(start)
+        val result = ArrayList<Pair<Int, String>>()
+        for (index in first until doc.paragraphs.size) {
+            val text = doc.paragraphs[index].text
+            if (text.isBlank()) continue
+            val base = paragraphOffsets[index]
+            if (index == first) {
+                val cut = (start - base).coerceIn(0, text.length)
+                if (cut >= text.length) continue
+                result += (start to text.substring(cut))
+            } else {
+                result += (base to text)
+            }
+        }
+        return result
+    }
+
     private fun paragraphForOffset(offset: Int): Int {
         val target = offset.coerceIn(0, (totalChars - 1).coerceAtLeast(0))
         var low = 0
@@ -393,6 +439,25 @@ class TextPageSource private constructor(
         return true
     }
 
+    /**
+     * Draws [index] directly onto a live canvas at [width] pixels. The page is vector text, so the
+     * reader's page view can paint it without allocating a full-page bitmap; [width] is the page
+     * rectangle actually on screen, which keeps the glyphs sharp at any zoom.
+     */
+    fun drawOn(canvas: Canvas, index: Int, width: Int, highlight: Highlight? = null) {
+        if (width <= 0) return
+        // A late frame may arrive after a chapter jump replaced the window: paint the theme over the
+        // stale text instead of leaving the previous chapter on screen.
+        canvas.drawColor(theme.bg.toInt())
+        if (index !in 0 until pageCount) return
+        canvas.save()
+        try {
+            drawScaled(canvas, index, scale = width.toDouble() / pageWidth, highlight = highlight)
+        } finally {
+            canvas.restore()
+        }
+    }
+
     override suspend fun render(index: Int, width: Int, cache: Boolean): Bitmap = layoutMutex.withLock {
         requireIndex(index)
         if (width <= 0) throw TextBookException("页面渲染宽度必须大于零。")
@@ -460,6 +525,11 @@ class TextPageSource private constructor(
         bodyPaint.color = theme.text.toInt()
         titlePaint.color = theme.text.toInt()
         bitmaps.evictAll()
+        // Every cached layout was measured with a paint copy, so it still carries the old ink.
+        // Rebuilding it is cheap and keeps page breaks, which do not depend on colour.
+        layouts.evictAll()
+        // Bumped after the paints change, so the view repainting for this key already has the new colours.
+        generation++
     }
 
     override suspend fun close() {
@@ -481,10 +551,17 @@ class TextPageSource private constructor(
     }
 
     /** Draws [index] at [scale] as if the whole page were rendered, shifted by (left, top). */
-    private fun drawScaled(canvas: Canvas, index: Int, scale: Double, left: Int = 0, top: Int = 0) {
+    private fun drawScaled(
+        canvas: Canvas,
+        index: Int,
+        scale: Double,
+        left: Int = 0,
+        top: Int = 0,
+        highlight: Highlight? = null,
+    ) {
         canvas.scale(scale.toFloat(), scale.toFloat())
         canvas.translate(-left.toFloat(), -top.toFloat())
-        drawPage(canvas, index)
+        drawPage(canvas, index, highlight)
     }
 
     @Synchronized
@@ -511,9 +588,11 @@ class TextPageSource private constructor(
         return layout
     }
 
-    private fun drawPage(canvas: Canvas, index: Int) {
+    private fun drawPage(canvas: Canvas, index: Int, highlight: Highlight? = null) {
         canvas.drawColor(theme.bg.toInt())
-        val page = pages[index]
+        // The live view draws from the UI thread while a chapter window may be swapped in the
+        // background; a vanished index must paint an empty page, never throw inside onDraw.
+        val page = pages.getOrNull(index) ?: return
         var y = marginTop
         for (segment in page.segments) {
             val layout = layoutFor(segment.paragraph)
@@ -526,6 +605,7 @@ class TextPageSource private constructor(
                 (marginX + contentWidth).toFloat(), (y + bottom - top).toFloat(),
             )
             canvas.translate(marginX.toFloat(), y - top.toFloat())
+            if (highlight != null) drawHighlight(canvas, layout, segment, highlight)
             layout.draw(canvas)
             canvas.restore()
             // Advance by the same top-to-top pitch for every line. StaticLayout leaves the last
@@ -535,11 +615,41 @@ class TextPageSource private constructor(
         }
     }
 
-    /** Loads the chapter holding [offset] and nothing else: this is the book's first visible page. */
+    /** Paints the part of [range] that falls inside this segment, in the segment's local space. */
+    private fun drawHighlight(canvas: Canvas, layout: StaticLayout, segment: Segment, range: Highlight) {
+        val start = paragraphOffsets[segment.paragraph]
+        val paragraphEnd = start + layout.text.length
+        val from = (maxOf(range.start, start) - start).coerceIn(0, layout.text.length)
+        val to = (minOf(range.end, paragraphEnd) - start).coerceIn(0, layout.text.length)
+        if (to <= from) return
+        val segmentEnd = segment.startLine + segment.lineCount - 1
+        val first = layout.getLineForOffset(from).coerceIn(segment.startLine, segmentEnd)
+        val last = layout.getLineForOffset((to - 1).coerceAtLeast(0)).coerceIn(segment.startLine, segmentEnd)
+        highlightPaint.color = (theme.text.toInt() and 0x00FFFFFF) or 0x33000000
+        for (line in first..last) {
+            val left = if (line == first) layout.getPrimaryHorizontal(from) else layout.getLineLeft(line)
+            val right = if (line == last) {
+                minOf(layout.getPrimaryHorizontal(to), layout.getLineRight(line))
+            } else layout.getLineRight(line)
+            val l = minOf(left, right)
+            val r = maxOf(left, right)
+            if (r <= l) continue
+            canvas.drawRect(
+                l, layout.getLineTop(line).toFloat(),
+                r, layout.getLineBottom(line).toFloat(), highlightPaint,
+            )
+        }
+    }
+
+    /** Loads the chapter holding [offset], plus the one before it, as a backward-scroll buffer. */
     suspend fun loadInitial(offset: Int): Unit = withContext(Dispatchers.Default) {
         layoutMutex.withLock {
             val chapter = chapterForOffset(offset)
             slices.clear()
+            // A window that starts at the reading chapter alone stops a backward fling dead at
+            // its first page. One chapter behind the spot is always laid out; callers resolve
+            // their page by character offset, so the extra pages cannot shift the anchor.
+            if (chapter > 0) slices += ChapterSlice(chapter - 1, paginateChapter(chapter - 1))
             slices += ChapterSlice(chapter, paginateChapter(chapter))
             generation++
             bitmaps.evictAll()
@@ -599,7 +709,7 @@ class TextPageSource private constructor(
         return pageForCharOffset(target.toLong())
     }
 
-    /** Loads a chapter by index and returns its first page in the current window. */
+    /** Loads a chapter by index and returns the page where that chapter begins in this window. */
     suspend fun jumpToChapter(index: Int): Int {
         val chapter = index.coerceIn(0, chapters.size - 1)
         if (slices.any { it.index == chapter }) {
@@ -610,7 +720,8 @@ class TextPageSource private constructor(
             }
         }
         loadInitial(chapterStartOffset(chapter))
-        return 0
+        // The window also holds the chapter before the target, so page zero is not its start.
+        return pageForCharOffset(chapterStartOffset(chapter).toLong())
     }
 
     private fun windowCharRange(): IntRange {

@@ -153,7 +153,17 @@ internal fun PreloadZoomMetadata(
 }
 
 @Stable
-internal class ReaderViewportState(val list: LazyListState, val pager: PagerState, val vertical: Boolean) {
+internal class ReaderViewportState(val list: LazyListState, val pager: PagerState, vertical: Boolean) {
+    // The reading mode may change while this viewport stays alive, so the direction is state:
+    // both scroll states are kept on the same page and only the active one drives the screen.
+    var vertical by mutableStateOf(vertical)
+        private set
+
+    /** Switches between vertical scrolling and horizontal paging without recreating the state. */
+    fun setReadingMode(value: Boolean) {
+        vertical = value
+    }
+
     // Tests without PDF metadata remain ready by default. Production supplies a live keyed predicate.
     var canZoom: () -> Boolean = { true }
     var layoutDirection = LayoutDirection.Ltr

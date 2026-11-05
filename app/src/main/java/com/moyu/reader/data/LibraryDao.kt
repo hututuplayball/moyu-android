@@ -491,5 +491,5 @@ abstract class LibraryDao {
     }
 
     /** Text layouts are rebuilt for every device, so two copies may legitimately differ in pages. */
-    private fun isTextBook(book: BookEntity) = book.format == FORMAT_TEXT || book.format == FORMAT_EPUB
+    private fun isTextBook(book: BookEntity) = book.isTextBook
 }

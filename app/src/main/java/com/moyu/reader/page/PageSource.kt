@@ -42,6 +42,16 @@ internal fun pageCacheLimit(): Int = min(
     48L * 1024L * 1024L,
 ).coerceAtLeast(1L).toInt()
 
+/**
+ * Text pages redraw from a cached layout in a few milliseconds, so keeping many full-page rasters
+ * buys nothing: the page being read and its neighbours are enough. The rest is memory a book could
+ * have spent on pages the reader has actually not seen yet.
+ */
+internal fun textPageCacheLimit(): Int = min(
+    Runtime.getRuntime().maxMemory() / 12L,
+    24L * 1024L * 1024L,
+).coerceAtLeast(1L).toInt()
+
 /** One sizing rule for rendering and cache lookup, so a prefetched page is a real hit later. */
 internal fun renderTargetSize(
     size: PageSize,

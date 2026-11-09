@@ -15,8 +15,8 @@ android {
         applicationId = "com.moyu.reader"
         minSdk = 26
         targetSdk = 35
-        versionCode = 109
-        versionName = "1.0.1"
+        versionCode = 110
+        versionName = "1.0.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildFeatures {
@@ -45,6 +45,14 @@ android {
             isMinifyEnabled = true
             signingConfig = signingConfigs.getByName("release")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
+    }
+    // One fixed name per build type, so a release package and a debug package never
+    // share a file name: moyu-<version>-release.apk / moyu-<version>-debug.apk.
+    applicationVariants.all {
+        outputs.all {
+            (this as com.android.build.gradle.internal.api.BaseVariantOutputImpl).outputFileName =
+                "moyu-$versionName-${buildType.name}.apk"
         }
     }
     packaging {

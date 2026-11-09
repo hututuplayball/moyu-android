@@ -1186,7 +1186,11 @@ private fun ReaderContent(
                     )
                 }
                 if (mode == "vertical") {
-                    LazyColumn(state = listState, modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(4.dp * zoom)) {
+                    // PDF and comic pages are whole sheets: a gap would show up as a seam between
+                    // them, so they sit flush. Text pages keep a small break so the paper edges
+                    // still read as separate pages.
+                    LazyColumn(state = listState, modifier = Modifier.fillMaxSize(),
+                        verticalArrangement = if (textSource == null) Arrangement.Top else Arrangement.spacedBy(4.dp * zoom)) {
                         items(pageCount, key = { it }) { page ->
                             if (textSource != null) {
                                 TextPagePlaceholder(textSource, page, Modifier.fillMaxWidth())

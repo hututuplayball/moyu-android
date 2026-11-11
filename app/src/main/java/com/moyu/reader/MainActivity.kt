@@ -5,9 +5,11 @@ import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.DocumentsContract
+import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -57,7 +59,9 @@ import com.moyu.reader.ui.reader.ReaderScreen
 import com.moyu.reader.ui.SettingsScreen
 import com.moyu.reader.ui.SplashScreen
 import com.moyu.reader.ui.library.LibraryScreen
+import com.moyu.reader.ui.library.OpenShelfDialog
 import com.moyu.reader.ui.library.clearCoverCache
+import java.util.Locale
 
 /**
  * Anchors the picker at the Downloads root. DocumentsUI otherwise reopens the last folder, and
@@ -71,8 +75,17 @@ private class OpenDownloads : ActivityResultContracts.OpenMultipleDocuments() {
         )
 }
 
+/** A file another app handed over, with the shelf it most likely belongs on. */
+private class OpenRequest(val uris: List<Uri>, val name: String, val suggested: Int)
+
 class MainActivity : ComponentActivity() {
     private var model: ReaderViewModel? = null
+
+    /**
+     * A file waiting to be imported. It is Compose state because the picker runs on the composition
+     * thread while the intent can arrive from onCreate or, with the app already open, onNewIntent.
+     */
+    private var incoming by mutableStateOf<OpenRequest?>(null)
 
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
@@ -88,6 +101,8 @@ class MainActivity : ComponentActivity() {
         // background between the system launch window and the first Compose frame.
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // A rotation must not import the file a second time: only the launch that carried it does.
+        if (savedInstanceState == null) incoming = openRequest(intent)
         setContent {
             val vm: ReaderViewModel = viewModel()
             model = vm
@@ -214,6 +229,20 @@ class MainActivity : ComponentActivity() {
                         .padding(bottom = 20.dp)) { data ->
                         PaperSnackbar(data.visuals.message)
                     }
+                    // A file opened from another app asks where it goes before anything is
+                    // imported; the splash holds it back so the question never covers the launch.
+                    val request = incoming
+                    if (request != null && !showSplash) {
+                        OpenShelfDialog(
+                            fileName = request.name,
+                            suggested = request.suggested,
+                            onImport = { kind ->
+                                incoming = null
+                                vm.importDocuments(request.uris, kind)
+                            },
+                            onDismiss = { incoming = null },
+                        )
+                    }
                 }
             }
         }
@@ -225,4 +254,44 @@ class MainActivity : ComponentActivity() {
         super.onStop()
         model?.onAppStopped()
     }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // singleTop: the running task takes the file instead of a second reader being launched.
+        setIntent(intent)
+        incoming = openRequest(intent)
+    }
+
+    /** The file an outside app asked us to open, if this launch carried one. */
+    private fun openRequest(intent: Intent?): OpenRequest? {
+        intent ?: return null
+        @Suppress("DEPRECATION")
+        val uri = when (intent.action) {
+            Intent.ACTION_VIEW -> intent.data
+            Intent.ACTION_SEND -> intent.getParcelableExtra(Intent.EXTRA_STREAM)
+            else -> null
+        } ?: return null
+        return OpenRequest(listOf(uri), displayName(uri) ?: "所选文件", shelfFor(intent, uri))
+    }
+
+    /**
+     * The shelf a file most likely belongs on, offered as the default in the chooser. A file
+     * arrives without the tab the reader was last looking at, so the container decides: readable
+     * text is a book, everything else is a comic.
+     */
+    private fun shelfFor(intent: Intent, uri: Uri): Int {
+        val mime = intent.type ?: runCatching { contentResolver.getType(uri) }.getOrNull()
+        val name = displayName(uri)?.lowercase(Locale.ROOT).orEmpty()
+        return when {
+            mime == "text/plain" || name.endsWith(".txt") -> KIND_EBOOK
+            mime == "application/epub+zip" || name.endsWith(".epub") -> KIND_EBOOK
+            else -> KIND_COMIC
+        }
+    }
+
+    private fun displayName(uri: Uri): String? = runCatching {
+        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) else null
+        }
+    }.getOrNull()
 }

@@ -8,18 +8,22 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.moyu.reader.data.BookEntity
 import com.moyu.reader.data.GroupEntity
 import com.moyu.reader.data.KIND_COMIC
+import com.moyu.reader.data.KIND_EBOOK
 import com.moyu.reader.ui.PaperAction
 import com.moyu.reader.ui.PaperConfirmation
 import com.moyu.reader.ui.PaperModal
+import com.moyu.reader.ui.PaperSegmented
 import com.moyu.reader.ui.PaperTextField
 import com.moyu.reader.ui.validGroupName
 
@@ -62,6 +66,49 @@ internal class ShelfDialogs(
         val Saver: Saver<ShelfDialogs, Any> = listSaver(
             save = { listOf(it.nameEditorId ?: "", it.nameDraft) },
             restore = { ShelfDialogs((it[0] as String).ifEmpty { null }, it[1] as String) },
+        )
+    }
+}
+
+/**
+ * Asks which shelf a file opened from outside the app belongs on.
+ *
+ * The container suggests an answer — readable text is a book, everything else a comic — but a PDF
+ * novel and a zipped set of scans are both ordinary, and a book cannot be moved to the other shelf
+ * later. Choosing is therefore separate from importing: the shelf is picked first, and nothing is
+ * read from the file until 「导入」 is pressed.
+ */
+@Composable
+internal fun OpenShelfDialog(
+    fileName: String,
+    suggested: Int,
+    onImport: (Int) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var picked by remember(fileName) { mutableStateOf(suggested) }
+    PaperModal(
+        title = "加入哪个书架？",
+        onDismiss = onDismiss,
+        actions = {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                PaperAction("取消", onDismiss, Modifier.weight(1f))
+                PaperAction("导入", { onImport(picked) }, Modifier.weight(1f), primary = true)
+            }
+        },
+    ) {
+        Text(
+            fileName,
+            style = MaterialTheme.typography.bodyMedium,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+        PaperSegmented(
+            options = listOf(
+                KIND_COMIC.toString() to "漫画书架",
+                KIND_EBOOK.toString() to "电子书书架",
+            ),
+            selected = picked.toString(),
+            onSelect = { picked = it.toInt() },
         )
     }
 }

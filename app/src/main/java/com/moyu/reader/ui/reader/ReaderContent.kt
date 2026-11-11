@@ -336,14 +336,21 @@ internal fun ReaderContent(
     }
     // Background playback runs in a foreground service: it keeps the process alive and shows
     // what is being read. Without that service the system may freeze the app mid-sentence.
-    LaunchedEffect(speechPreferences.background, speech.reader.status, speech.reader.line?.text) {
-        val reading = speech.reader.status == SpeechReader.Status.Playing ||
-            speech.reader.status == SpeechReader.Status.Paused
-        if (speechPreferences.background && reading) {
+    // The service follows the reading itself, while each sentence only re-posts its notification:
+    // starting the service per sentence meant a background-start check and a notification rebuild
+    // every few seconds, for a notification whose text had merely moved on.
+    val readingAloud = speech.reader.status == SpeechReader.Status.Playing ||
+        speech.reader.status == SpeechReader.Status.Paused
+    LaunchedEffect(speechPreferences.background, readingAloud) {
+        if (speechPreferences.background && readingAloud) {
             SpeechService.start(activity.applicationContext, book.title, speech.reader.line?.text)
         } else {
             SpeechService.stop(activity.applicationContext)
         }
+    }
+    LaunchedEffect(speechPreferences.background, readingAloud, speech.reader.line?.text) {
+        val line = speech.reader.line?.text ?: return@LaunchedEffect
+        if (speechPreferences.background && readingAloud) SpeechService.update(book.title, line)
     }
     DisposableEffect(speech) {
         // The notification's stop button reaches this reader while it is alive.

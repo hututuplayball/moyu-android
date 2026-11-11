@@ -21,8 +21,13 @@ import com.moyu.reader.R
  * requires for audio played outside the activity, and shows what is being read with a way to stop.
  */
 class SpeechService : Service() {
+    /** What the notification currently says, so an update that changes nothing is not sent. */
+    private var shownTitle = ""
+    private var shownText: String? = null
+
     override fun onCreate() {
         super.onCreate()
+        running = this
         createChannel()
     }
 
@@ -32,19 +37,29 @@ class SpeechService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        startForeground(
-            NOTIFICATION_ID,
-            build(intent?.getStringExtra(EXTRA_TITLE).orEmpty(), intent?.getStringExtra(EXTRA_TEXT)),
-        )
+        show(intent?.getStringExtra(EXTRA_TITLE).orEmpty(), intent?.getStringExtra(EXTRA_TEXT))
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
+        if (running === this) running = null
         notificationManager.cancel(NOTIFICATION_ID)
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    /**
+     * Re-posts the foreground notification with what is being read now.
+     *
+     * This is the one call a running reading makes per sentence: no service start, no background
+     * start check, no new notification object beyond the one the reader is looking at.
+     */
+    private fun show(title: String, text: String?) {
+        shownTitle = title
+        shownText = text
+        startForeground(NOTIFICATION_ID, build(title, text))
+    }
 
     private fun build(title: String, text: String?): Notification {
         val open = PendingIntent.getActivity(
@@ -95,11 +110,25 @@ class SpeechService : Service() {
         /** While a reader exists, the notification's stop button reaches its own [SpeechReader]. */
         var stopReading: (() -> Unit)? = null
 
+        /** The live service, if the reading is running in the background. Cleared in onDestroy. */
+        @Volatile
+        private var running: SpeechService? = null
+
         fun start(context: Context, title: String, text: String?) {
             val intent = Intent(context, SpeechService::class.java)
                 .putExtra(EXTRA_TITLE, title)
                 .putExtra(EXTRA_TEXT, text)
             ContextCompat.startForegroundService(context, intent)
+        }
+
+        /**
+         * Moves the notification onto the sentence being read now. A reading that is not in the
+         * background has no service, and nothing to update.
+         */
+        fun update(title: String, text: String?) {
+            val service = running ?: return
+            if (title == service.shownTitle && text == service.shownText) return
+            runCatching { service.show(title, text) }
         }
 
         fun stop(context: Context) {

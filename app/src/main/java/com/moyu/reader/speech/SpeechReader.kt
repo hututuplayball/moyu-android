@@ -1,6 +1,9 @@
 package com.moyu.reader.speech
 
 import android.content.Context
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
@@ -53,6 +56,27 @@ class SpeechReader(context: Context) {
     private var spokenOffset = 0
     // The utterance the engine is working on; callbacks from an older one are ignored.
     private var currentUtterance: String? = null
+
+    private val audio: AudioManager = app.getSystemService(AudioManager::class.java)
+
+    /**
+     * Describes this reading to the focus system only — it does not choose the output path the
+     * engine renders through, so it is not the knob that was tried against the Bluetooth hiss.
+     */
+    private val focusAttributes: AudioAttributes = AudioAttributes.Builder()
+        .setUsage(AudioAttributes.USAGE_MEDIA)
+        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+        .build()
+
+    private var focusRequest: AudioFocusRequest? = null
+    private var holdingFocus = false
+    /** True while a call or a spoken prompt owns the audio: only that may resume the reading itself. */
+    private var pausedForFocus = false
+
+    private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
+        // Focus callbacks arrive on a binder thread; the reading itself lives on the main thread.
+        main.post { onAudioFocusChange(change) }
+    }
 
     /**
      * Reads [paragraphs] from the beginning. Each entry is the book offset the text starts at and
@@ -143,14 +167,24 @@ class SpeechReader(context: Context) {
      * button instead.
      */
     fun pause() {
+        // A pause the reader asked for must not resume itself when a call ends later.
+        pausedForFocus = false
+        pauseReading(releaseAudio = true)
+    }
+
+    private fun pauseReading(releaseAudio: Boolean) {
         if (status != Status.Playing) return
         // Cancel the running utterance before the state flips, so its callbacks are ignored.
         currentUtterance = null
         runCatching { tts?.stop() }
         status = Status.Paused
+        // A pause the reader chose hands the session back; one caused by a call keeps it, or the
+        // end of that call would never reach us.
+        if (releaseAudio) releaseFocus()
     }
 
     fun resume() {
+        pausedForFocus = false
         if (status != Status.Paused) return
         val text = spoken
         if (text != null) speak(text, spokenOffset) else speakNext()
@@ -158,6 +192,7 @@ class SpeechReader(context: Context) {
 
     fun stop() {
         stopped = true
+        pausedForFocus = false
         currentUtterance = null
         runCatching { tts?.stop() }
         status = Status.Idle
@@ -165,6 +200,7 @@ class SpeechReader(context: Context) {
         spoken = null
         paragraphs = emptyList()
         sentences = emptyList()
+        releaseFocus()
     }
 
     /** Drops the engine; the device may take it back at any time, so it is rebuilt when needed. */
@@ -216,6 +252,67 @@ class SpeechReader(context: Context) {
         return true
     }
 
+    /**
+     * Takes the audio session before the first sentence and keeps it for the whole reading.
+     *
+     * A book is read for tens of minutes, so this asks for [AudioManager.AUDIOFOCUS_GAIN] the way a
+     * music player would, not the transient request a notification sound uses: a transient holder
+     * may keep playing underneath, ducked, and can be taken back at any moment.
+     */
+    private fun acquireFocus(): Boolean {
+        if (holdingFocus) return true
+        val request = focusRequest ?: AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+            .setAudioAttributes(focusAttributes)
+            // Speech should not be mixed under music, so a request to duck is treated as a pause.
+            .setWillPauseWhenDucked(true)
+            .setOnAudioFocusChangeListener(focusListener, main)
+            .build()
+            .also { focusRequest = it }
+        holdingFocus = audio.requestAudioFocus(request) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        return holdingFocus
+    }
+
+    /** Gives the session back, so a paused reading does not keep other players silent. */
+    private fun releaseFocus() {
+        if (!holdingFocus) return
+        holdingFocus = false
+        runCatching { focusRequest?.let { audio.abandonAudioFocusRequest(it) } }
+    }
+
+    /**
+     * A call or a navigation prompt takes the audio for a moment: the reading holds its sentence and
+     * takes over again when it ends. Anything that owns the audio for good stops it instead — a book
+     * that keeps a stopped sentence on screen would look like it is still reading.
+     */
+    private fun onAudioFocusChange(change: Int) {
+        when (change) {
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                if (status == Status.Playing) {
+                    pausedForFocus = true
+                    // The request stays in the system's queue: giving it up would also give up the
+                    // callback that says the call is over.
+                    pauseReading(releaseAudio = false)
+                }
+            }
+            AudioManager.AUDIOFOCUS_GAIN -> {
+                if (pausedForFocus) {
+                    pausedForFocus = false
+                    resume()
+                }
+            }
+            AudioManager.AUDIOFOCUS_LOSS -> {
+                pausedForFocus = false
+                if (status == Status.Playing || status == Status.Paused) {
+                    stop()
+                    status = Status.Failed
+                    failure = "朗读已停止：其他应用接过了声音"
+                }
+                releaseFocus()
+            }
+        }
+    }
+
     private fun applyVoice() {
         val engine = tts ?: return
         runCatching { engine.setSpeechRate(rate) }
@@ -244,6 +341,7 @@ class SpeechReader(context: Context) {
                 line = null
                 paragraphs = emptyList()
                 sentences = emptyList()
+                releaseFocus()
                 return
             }
             val (offset, text) = paragraphs[paragraphIndex]
@@ -260,6 +358,14 @@ class SpeechReader(context: Context) {
     /** Hands one sentence to the engine and shows it as the line being read. */
     private fun speak(text: String, offset: Int) {
         val engine = tts ?: return
+        // Nothing is spoken without the audio session: without it the reading would be mixed under
+        // whatever else is playing, and the reader would not know why it sounds wrong.
+        if (!acquireFocus()) {
+            status = Status.Failed
+            failure = "无法开始朗读：其他应用正在使用音频"
+            return
+        }
+        failure = null
         stopped = false
         spoken = text
         spokenOffset = offset
@@ -274,6 +380,7 @@ class SpeechReader(context: Context) {
         if (result != TextToSpeech.SUCCESS) {
             status = Status.Failed
             failure = "无法朗读这段文字"
+            releaseFocus()
         }
     }
 
@@ -304,6 +411,7 @@ class SpeechReader(context: Context) {
         status = Status.Failed
         failure = "朗读中断，请重试"
         line = null
+        releaseFocus()
     }
 
     /** Attaches the progress listener to the engine that was just created. */

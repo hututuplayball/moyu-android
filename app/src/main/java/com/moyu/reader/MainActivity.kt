@@ -50,14 +50,14 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.moyu.reader.data.KIND_COMIC
 import com.moyu.reader.data.KIND_EBOOK
-import com.moyu.reader.ui.LibraryScreen
 import com.moyu.reader.ui.LocalMoyuReduceMotion
 import com.moyu.reader.ui.MoyuTheme
 import com.moyu.reader.ui.PaperSnackbar
-import com.moyu.reader.ui.ReaderScreen
+import com.moyu.reader.ui.reader.ReaderScreen
 import com.moyu.reader.ui.SettingsScreen
 import com.moyu.reader.ui.SplashScreen
-import com.moyu.reader.ui.clearCoverCache
+import com.moyu.reader.ui.library.LibraryScreen
+import com.moyu.reader.ui.library.clearCoverCache
 
 /**
  * Anchors the picker at the Downloads root. DocumentsUI otherwise reopens the last folder, and

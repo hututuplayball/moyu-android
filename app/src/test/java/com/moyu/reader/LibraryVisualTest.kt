@@ -16,7 +16,7 @@ import com.moyu.reader.data.BookEntity
 import com.moyu.reader.data.GroupEntity
 import com.moyu.reader.data.KIND_EBOOK
 import com.moyu.reader.data.ReaderPreferences
-import com.moyu.reader.ui.LibraryScreen
+import com.moyu.reader.ui.library.LibraryScreen
 import com.moyu.reader.ui.MoyuTheme
 import com.moyu.reader.ui.SettingsScreen
 import com.moyu.reader.ui.SplashScreen

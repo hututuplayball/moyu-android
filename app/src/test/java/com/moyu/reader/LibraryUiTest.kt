@@ -35,7 +35,7 @@ import com.moyu.reader.data.READ_VIEW_PDF
 import com.moyu.reader.data.READ_VIEW_TEXT
 import com.moyu.reader.data.ReaderPreferences
 import com.moyu.reader.data.TEXT_READY
-import com.moyu.reader.ui.LibraryScreen
+import com.moyu.reader.ui.library.LibraryScreen
 import com.moyu.reader.ui.MoyuTheme
 import com.moyu.reader.ui.PaperConfirmation
 import com.moyu.reader.ui.ReadingModePanel
